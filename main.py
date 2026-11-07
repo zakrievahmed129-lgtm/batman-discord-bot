@@ -627,12 +627,45 @@ class GhostwriterView(discord.ui.View):
     async def _send_reply(self, interaction: discord.Interaction, text: str, opt_num: int):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+
+        content = f"> 💬 *En réponse à {self.target_message.author.display_name} :*\n{text}"
+        sent = False
+
+        # Tentative 1 : Via interaction publique (support User Apps)
         try:
-            content = f"> 💬 *En réponse à {self.target_message.author.display_name} :*\n{text}"
-            await interaction.channel.send(content=content)
-            await interaction.response.send_message(f"✅ Option {opt_num} envoyée dans le salon !", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(f"⚠️ Impossible d'envoyer le message : `{e}`", ephemeral=True)
+            await interaction.response.send_message(content=content, ephemeral=False)
+            sent = True
+        except Exception:
+            pass
+
+        # Tentative 2 : Via channel.send (si le bot est membre du serveur)
+        if not sent:
+            try:
+                await interaction.channel.send(content=content)
+                sent = True
+                await interaction.response.send_message(f"✅ Option {opt_num} envoyée dans le salon !", ephemeral=True)
+            except discord.Forbidden:
+                err_embed = discord.Embed(
+                    title="🔒 Permission manquante dans ce salon (403)",
+                    description=(
+                        "Batman ne peut pas poster directement dans ce salon car :\n"
+                        "• Soit le bot n'a pas été **invité sur ce serveur** avec la permission d'écrire (tu l'utilises en tant qu'application utilisateur personnelle).\n"
+                        "• Soit il manque la permission **Envoyer des messages** dans ce salon précis.\n\n"
+                        "📋 **Copie simplement le texte ci-dessous pour l'envoyer toi-même :**\n"
+                        f"```\n{text}\n```"
+                    ),
+                    color=discord.Color.orange()
+                )
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=err_embed, ephemeral=True)
+                else:
+                    await interaction.response.send_message(embed=err_embed, ephemeral=True)
+            except Exception as e:
+                err_msg = f"⚠️ Impossible d'envoyer le message : `{e}`"
+                if interaction.response.is_done():
+                    await interaction.followup.send(err_msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(err_msg, ephemeral=True)
 
     @discord.ui.button(label="Envoyer Option 1", style=discord.ButtonStyle.success, emoji="🎯")
     async def btn_opt1(self, interaction: discord.Interaction, _: discord.ui.Button):
