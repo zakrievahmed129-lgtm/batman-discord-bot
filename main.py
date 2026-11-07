@@ -24,6 +24,9 @@ DATA_DIR    = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 NOTES_FILE  = os.path.join(DATA_DIR, "notes.json")
 TODOS_FILE  = os.path.join(DATA_DIR, "todos.json")
+MEMORY_FILE = os.path.join(DATA_DIR, "ai_memory.json")
+STYLES_FILE = os.path.join(DATA_DIR, "user_styles.json")
+AFK_FILE    = os.path.join(DATA_DIR, "afk.json")
 
 def load_json(fp):
     if os.path.exists(fp):
@@ -94,6 +97,47 @@ async def on_ready():
     if not rotate_presence.is_running():
         rotate_presence.start()
 
+# ─────────────────────── ON MESSAGE (AFK) ─────────────────────
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    uid = str(message.author.id)
+    afk_data = load_json(AFK_FILE)
+
+    # 1. Si l'auteur du message était en mode AFK, on le retire dès qu'il parle
+    if uid in afk_data:
+        since_ts = afk_data[uid].get("since", int(datetime.now().timestamp()))
+        del afk_data[uid]
+        save_json(AFK_FILE, afk_data)
+        try:
+            await message.channel.send(
+                f"👋 Bon retour {message.author.mention} ! Ton mode AFK a été désactivé (tu étais absent depuis <t:{since_ts}:R>).",
+                delete_after=8
+            )
+        except Exception:
+            pass
+
+    # 2. Si un utilisateur mentionné dans le message est AFK
+    if message.mentions:
+        for user in message.mentions:
+            u_id = str(user.id)
+            if u_id != uid and u_id in afk_data:
+                u_info = afk_data[u_id]
+                reason = u_info.get("reason", "Absent")
+                since_ts = u_info.get("since", int(datetime.now().timestamp()))
+                try:
+                    embed_afk = discord.Embed(
+                        description=f"💤 **{user.display_name}** est actuellement absent(e) : *« {reason} »* (parti <t:{since_ts}:R>)",
+                        color=discord.Color.light_grey()
+                    )
+                    await message.channel.send(embed=embed_afk, delete_after=12)
+                except Exception:
+                    pass
+
+    await bot.process_commands(message)
+
 # ══════════════════════════════════════════════════════════════
 #  DÉCORATIONS COMMUNES (disponibles partout : serveurs + MP)
 # ══════════════════════════════════════════════════════════════
@@ -103,9 +147,15 @@ def everywhere(cmd):
     return cmd
 
 # ══════════════════════════════════════════════════════════════
-#  HELPERS IA : GEMINI (VISION & TEXTE) + GÉNÉRATION D'IMAGES
+#  HELPERS IA : GEMINI (VISION & TEXTE) + MÉMOIRE CONVERSATIONNELLE
 # ══════════════════════════════════════════════════════════════
-async def ask_gemini(prompt: str, image_bytes: bytes = None, mime_type: str = "image/png") -> str:
+async def ask_gemini(
+    prompt: str,
+    image_bytes: bytes = None,
+    mime_type: str = "image/png",
+    history: list = None,
+    system_instruction: str = None
+) -> str:
     key = os.getenv("GEMINI_API_KEY")
     if not key:
         return "⚠️ Clé GEMINI_API_KEY manquante dans les variables d'environnement."
@@ -124,15 +174,28 @@ async def ask_gemini(prompt: str, image_bytes: bytes = None, mime_type: str = "i
     ]
 
     contents = []
+    # 1. Contexte d'historique de conversation (mémoire)
+    if history:
+        for turn in history[-10:]:
+            r = turn.get("role", "user")
+            t = turn.get("text", "")
+            if t:
+                contents.append(types.Content(role=r, parts=[types.Part.from_text(text=t)]))
+
+    # 2. Tour actuel (texte + image optionnelle)
+    user_parts = []
     if image_bytes:
         clean_mime = mime_type.split(";")[0].strip() if mime_type else "image/png"
-        contents.append(types.Part.from_bytes(data=image_bytes, mime_type=clean_mime))
-    contents.append(prompt)
+        user_parts.append(types.Part.from_bytes(data=image_bytes, mime_type=clean_mime))
+    user_parts.append(types.Part.from_text(text=prompt))
+    contents.append(types.Content(role="user", parts=user_parts))
+
+    config = types.GenerateContentConfig(system_instruction=system_instruction) if system_instruction else None
 
     last_err = None
     for m in models:
         try:
-            resp = await client.aio.models.generate_content(model=m, contents=contents)
+            resp = await client.aio.models.generate_content(model=m, contents=contents, config=config)
             if resp.text:
                 return resp.text.strip()
         except Exception as e:
@@ -141,7 +204,83 @@ async def ask_gemini(prompt: str, image_bytes: bytes = None, mime_type: str = "i
     raise last_err or Exception("Aucun modèle Gemini n'a pu répondre.")
 
 
-async def generate_ai_image(prompt: str, style_modifier: str = "Naturel") -> tuple[bytes, str]:
+# ───────────────── GESTION DE LA MÉMOIRE IA ───────────────────
+def get_user_memory(uid: str) -> list:
+    mem = load_json(MEMORY_FILE)
+    return mem.get(uid, {}).get("history", [])
+
+def append_user_memory(uid: str, user_text: str, ai_text: str):
+    mem = load_json(MEMORY_FILE)
+    u_data = mem.get(uid, {"history": []})
+    hist = u_data.get("history", [])
+    hist.append({"role": "user", "text": user_text[:800]})
+    hist.append({"role": "model", "text": ai_text[:1200]})
+    u_data["history"] = hist[-12:] # 6 allers-retours max pour rester rapide
+    u_data["last_updated"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+    mem[uid] = u_data
+    save_json(MEMORY_FILE, mem)
+
+def reset_user_memory(uid: str):
+    mem = load_json(MEMORY_FILE)
+    if uid in mem:
+        mem[uid]["history"] = []
+        save_json(MEMORY_FILE, mem)
+
+
+# ─────────────── GESTION DU STYLE DE LANGAGE ──────────────────
+DEFAULT_STYLE = "Naturel, décontracté, tutoiement amical, phrases claires, emojis légers"
+
+PRESET_STYLES = {
+    "familier": {
+        "label": "🤙 Familier & Argot urbain",
+        "rules": "Argot moderne (wesh, frérot, mdrr, chaud, tranquille, sah, bg), phrases courtes, minuscules, direct, détendu."
+    },
+    "cool": {
+        "label": "🤝 Cool & Amical",
+        "rules": "Chaleureux, bienveillant, tutoiement spontané, emojis sympas, positif et amical."
+    },
+    "pro": {
+        "label": "💼 Professionnel & Courtois",
+        "rules": "Poli, soigné, sans fautes, vouvoiement/tutoiement courtois, précis, bien articulé et orienté solution."
+    },
+    "batman": {
+        "label": "🦇 Batman / Chevalier Noir",
+        "rules": "Sombre, laconique, percutant, voix grave, direct, aucune fioriture inutile."
+    },
+    "sarcasme": {
+        "label": "⚡ Sarcastique & Piquant",
+        "rules": "Second degré aiguisé, ironique, répartie affûtée, taquin et incisif sans vulgarité."
+    }
+}
+
+def get_user_style_description(uid: str) -> str:
+    styles = load_json(STYLES_FILE)
+    if uid in styles:
+        return styles[uid].get("rules", DEFAULT_STYLE)
+    return DEFAULT_STYLE
+
+def get_user_style_label(uid: str) -> str:
+    styles = load_json(STYLES_FILE)
+    if uid in styles:
+        return styles[uid].get("label", "Personnalisé")
+    return "Standard (Défaut)"
+
+def set_user_style(uid: str, label: str, rules: str, samples: str = ""):
+    styles = load_json(STYLES_FILE)
+    styles[uid] = {
+        "label": label,
+        "rules": rules,
+        "samples": samples,
+        "updated": datetime.now().strftime("%d/%m/%Y %H:%M")
+    }
+    save_json(STYLES_FILE, styles)
+
+
+async def generate_ai_image(
+    prompt: str,
+    style_modifier: str = "Naturel",
+    aspect_ratio: str = "1:1"
+) -> tuple[bytes, str]:
     """
     Génère une image originale par IA.
     1. Tente d'abord Google GenAI Imagen 3 si GEMINI_API_KEY est configurée.
@@ -150,6 +289,15 @@ async def generate_ai_image(prompt: str, style_modifier: str = "Naturel") -> tup
     enhanced_prompt = prompt
     if style_modifier and style_modifier != "Naturel":
         enhanced_prompt = f"{prompt}, {style_modifier}"
+
+    dim_map = {
+        "1:1": (1024, 1024),
+        "16:9": (1280, 720),
+        "9:16": (720, 1280),
+        "4:3": (1024, 768),
+        "3:4": (768, 1024)
+    }
+    width, height = dim_map.get(aspect_ratio, (1024, 1024))
 
     key = os.getenv("GEMINI_API_KEY")
     # Tentative 1 : Google GenAI Imagen 3
@@ -160,7 +308,11 @@ async def generate_ai_image(prompt: str, style_modifier: str = "Naturel") -> tup
             resp = await client.aio.models.generate_images(
                 model="imagen-3.0-generate-002",
                 prompt=enhanced_prompt,
-                config=dict(number_of_images=1, output_mime_type="image/png")
+                config=dict(
+                    number_of_images=1,
+                    output_mime_type="image/png",
+                    aspect_ratio=aspect_ratio
+                )
             )
             if resp.generated_images and resp.generated_images[0].image:
                 return resp.generated_images[0].image.image_bytes, "Google Imagen 3"
@@ -170,7 +322,7 @@ async def generate_ai_image(prompt: str, style_modifier: str = "Naturel") -> tup
     # Tentative 2 : Moteur Pollinations Flux HD (Garantie de service 24h/24)
     encoded = urllib.parse.quote(enhanced_prompt)
     seed = random.randint(1000, 9999999)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}&model=flux"
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width={width}&height={height}&nologo=true&seed={seed}&model=flux"
     async with aiohttp.ClientSession() as session:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=45)) as r:
             if r.status == 200:
@@ -184,10 +336,11 @@ async def generate_ai_image(prompt: str, style_modifier: str = "Naturel") -> tup
 # ══════════════════════════════════════════════════════════════
 HELP_PAGES = [
     {
-        "title": "🦇 Batman — Page 1/4 : Essentiels",
+        "title": "🦇 Batman — Page 1/5 : Essentiels & Mode Absent",
         "color": discord.Color.dark_theme(),
         "fields": [
             ("🏓 /ping", "Latence en ms, état du bot et uptime en direct.", False),
+            ("💤 /afk", "`[raison]` — Active ton mode absence ; Batman prévient ceux qui te mentionnent.", False),
             ("⏰ /rappel", "`duree` + `message` — Rappel automatique livré en MP (ex: 10m, 2h, 1j).", False),
             ("🦇 /batman", "Punchlines et citations légendaires du Chevalier Noir.", False),
             ("🎲 /dice", "`faces` + `nombre` — Lance des dés pour le fun ou les jeux de rôle.", False),
@@ -195,7 +348,7 @@ HELP_PAGES = [
         ]
     },
     {
-        "title": "🦇 Batman — Page 2/4 : To-Do & Notes Interactives",
+        "title": "🦇 Batman — Page 2/5 : To-Do & Notes Interactives",
         "color": discord.Color.blue(),
         "fields": [
             ("📋 /todo", "Tableau interactif complet : coche d'un clic, ajoute par pop-up, modifie !", False),
@@ -205,7 +358,7 @@ HELP_PAGES = [
         ]
     },
     {
-        "title": "🦇 Batman — Page 3/4 : Utilitaires & Jeux",
+        "title": "🦇 Batman — Page 3/5 : Utilitaires & Jeux",
         "color": discord.Color.purple(),
         "fields": [
             ("📊 /sondage", "`question` + `options` — Crée un sondage interactif avec barres de vote en direct !", False),
@@ -216,14 +369,26 @@ HELP_PAGES = [
         ]
     },
     {
-        "title": "🦇 Batman — Page 4/4 : IA, Vision & Images",
+        "title": "🦇 Batman — Page 4/5 : Conversation, Clone de Style & Mémoire",
         "color": discord.Color.teal(),
         "fields": [
-            ("🧠 /ia", "`question` + `[image]` — Questionne Gemini ou fais analyser une photo/capture.", False),
-            ("🎨 /image", "`description` + `[style]` — Génère une image IA en haute définition.", False),
-            ("✨ /imagine", "`prompt` — Raccourci rapide pour générer une image artistique.", False),
+            ("🧠 /ia", "`question` + `[image]` — Discussion avec mémoire continue et vision multimodale.", False),
+            ("💭 /ia_memoire", "Consulte ce que l'IA a en mémoire sur tes conversations passées.", False),
+            ("🧹 /ia_reset", "Efface l'historique de discussion pour repartir sur une conversation neuve.", False),
+            ("🎨 /mon_style", "`[preset]` + `[description]` — Configure ton style d'écriture pour les réponses auto.", False),
+            ("💬 /reponds_pour_moi", "`message` + `[intention]` — Génère 3 réponses calibrées selon ton style.", False),
+            ("✍️ /reformuler", "`texte` + `style` — Reformule une phrase (Pro, Clash, Batman, Diplomate...).", False),
+            ("⚡ /repartie", "`sujet` + `[intensite]` — Génère des réparties et punchlines légendaires.", False),
+        ]
+    },
+    {
+        "title": "🦇 Batman — Page 5/5 : Images IA & Clic-Droit Magique",
+        "color": discord.Color.gold(),
+        "fields": [
+            ("🎨 /image", "`description` + `[style]` + `[format]` — Génère une image IA avec boutons interactifs.", False),
+            ("✨ /imagine", "`prompt` — Raccourci de création artistique par IA.", False),
             ("🌍 /traduire", "`texte` + `langue` — Traduction instantanée ultra-naturelle avec l'IA.", False),
-            ("🖱️ Clic Droit Message ➜ Apps", "• **🧠 Résumer avec Batman** : Résume n'importe quel message en 1 clic.\n• **🔍 Analyser l'image (IA)** : Analyse une image postée.\n• **📝 Sauvegarder en note** : Enregistre un message directement dans tes notes !", False),
+            ("🖱️ Clic Droit Message ➜ Apps", "• **💬 Répondre à ma place** : Analyse le message et propose 3 réponses dans ton style.\n• **🎭 Analyser le ton & sous-entendus** : Décode les non-dits et le ton émotionnel.\n• **🧠 Résumer avec Batman** : Résume un pavé en 1 clic.\n• **🔍 Analyser l'image (IA)** : Analyse n'importe quelle photo ou capture.\n• **📝 Sauvegarder en note** : Enregistre le message dans ton carnet.", False),
             ("🖱️ Clic Droit Profil ➜ Apps", "• **🦇 Profil & Avatar HD** : Affiche l'avatar en pleine résolution et les infos de compte.", False),
         ]
     }
@@ -402,6 +567,131 @@ async def context_analyze_image(interaction: discord.Interaction, message: disco
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
+
+
+# 5. Clic droit sur un message -> Répondre à ma place (Ghostwriter)
+class GhostwriterView(discord.ui.View):
+    def __init__(self, target_message: discord.Message, author_id: int, opt1: str, opt2: str, opt3: str):
+        super().__init__(timeout=600)
+        self.target_message = target_message
+        self.author_id = author_id
+        self.opt1 = opt1
+        self.opt2 = opt2
+        self.opt3 = opt3
+
+    async def _send_reply(self, interaction: discord.Interaction, text: str, opt_num: int):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        try:
+            content = f"> 💬 *En réponse à {self.target_message.author.display_name} :*\n{text}"
+            await interaction.channel.send(content=content)
+            await interaction.response.send_message(f"✅ Option {opt_num} envoyée dans le salon !", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"⚠️ Impossible d'envoyer le message : `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Envoyer Option 1", style=discord.ButtonStyle.success, emoji="🎯")
+    async def btn_opt1(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._send_reply(interaction, self.opt1, 1)
+
+    @discord.ui.button(label="Envoyer Option 2", style=discord.ButtonStyle.primary, emoji="⚡")
+    async def btn_opt2(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._send_reply(interaction, self.opt2, 2)
+
+    @discord.ui.button(label="Envoyer Option 3", style=discord.ButtonStyle.secondary, emoji="🤝")
+    async def btn_opt3(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._send_reply(interaction, self.opt3, 3)
+
+
+@bot.tree.context_menu(name="💬 Répondre à ma place")
+@everywhere
+async def context_reply_for_me(interaction: discord.Interaction, message: discord.Message):
+    content = message.clean_content or message.content
+    if not content:
+        return await interaction.response.send_message("❌ Ce message ne contient pas de texte.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    uid = str(interaction.user.id)
+    user_style = get_user_style_description(uid)
+    style_label = get_user_style_label(uid)
+
+    prompt = f"""Tu es un ghostwriter Discord expert. L'utilisateur veut répondre à ce message reçu de {message.author.display_name} :
+« {content} »
+
+Voici le style de langage habituel de l'utilisateur :
+{user_style}
+
+Génère 3 propositions de réponses prêtes à l'envoi, adaptées au contexte de la conversation :
+1. Dans son style personnel (imitation très fidèle des tics de langage, vocabulaire et ton)
+2. Piquante & Drôle (avec de l'esprit, du second degré ou une répartie)
+3. Diplomate & Efficace (courte, bienveillante et claire)
+
+RÉPONDS EXACTEMENT AU FORMAT :
+===OPT1===
+(texte de l'option 1 uniquement)
+===OPT2===
+(texte de l'option 2 uniquement)
+===OPT3===
+(texte de l'option 3 uniquement)"""
+
+    try:
+        raw = await ask_gemini(prompt)
+        opt1, opt2, opt3 = "", "", ""
+        if "===OPT1===" in raw and "===OPT2===" in raw and "===OPT3===" in raw:
+            parts = raw.split("===OPT1===")[1].split("===OPT2===")
+            opt1 = parts[0].strip()
+            parts2 = parts[1].split("===OPT3===")
+            opt2 = parts2[0].strip()
+            opt3 = parts2[1].strip()
+        else:
+            opt1 = raw[:300].strip()
+            opt2 = "Pas mal, mais je préfère passer mon tour !"
+            opt3 = "Message bien reçu, je reviens vers toi rapidement !"
+
+        embed = discord.Embed(
+            title="💬 Propositions de réponses prêtes à l'emploi",
+            description=f"En réponse à **{message.author.display_name}** :\n> *« {content[:150]}... »*\n\n"
+                        f"**🎯 Option 1 (Ton style : {style_label}) :**\n```\n{opt1}\n```\n"
+                        f"**⚡ Option 2 (Piquante / Drôle) :**\n```\n{opt2}\n```\n"
+                        f"**🤝 Option 3 (Diplomate / Bref) :**\n```\n{opt3}\n```",
+            color=discord.Color.teal()
+        )
+        embed.set_footer(text="Discret (visible uniquement par toi) • Clique pour envoyer ou copie directement.")
+        view = GhostwriterView(message, interaction.user.id, opt1, opt2, opt3)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
+
+
+# 6. Clic droit sur un message -> Analyser le ton & les sous-entendus
+@bot.tree.context_menu(name="🎭 Analyser ton & sous-entendus")
+@everywhere
+async def context_analyze_tone(interaction: discord.Interaction, message: discord.Message):
+    content = message.clean_content or message.content
+    if not content:
+        return await interaction.response.send_message("❌ Ce message ne contient pas de texte.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    prompt = f"""Fais une analyse psychologique fine de ce message Discord envoyé par {message.author.display_name} :
+« {content} »
+
+Donne :
+1. 🎭 **Ton émotionnel dominant** (ex: Passif-agressif, Ironique, Taquin, Flirteur, Sérieux, Énervé, etc.)
+2. 🔍 **Sous-entendus & Non-dits** (ce que la personne pense probablement sans le dire ouvertement)
+3. 💡 **Conseil stratégique** (comment réagir intelligemment sans créer de drama ou pour reprendre l'avantage)
+
+Reste concis, clair et direct."""
+
+    try:
+        analysis = await ask_gemini(prompt)
+        embed = discord.Embed(
+            title=f"🎭 Analyse de ton : {message.author.display_name}",
+            description=f"> *« {content[:200]} »*\n\n{analysis[:1800]}",
+            color=discord.Color.purple()
+        )
+        embed.set_footer(text="Analyse psychologique discrète générée par Batman IA")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1094,11 +1384,14 @@ async def note_ajouter(interaction: discord.Interaction, titre: str, contenu: st
 # ══════════════════════════════════════════════════════════════
 #  /ia  —  Assistant IA Gemini (Texte & Vision Multimodale)
 # ══════════════════════════════════════════════════════════════
-@bot.tree.command(name="ia", description="Pose une question à l'IA ou fais analyser une image")
+# ══════════════════════════════════════════════════════════════
+#  ASSISTANT IA GEMINI (MÉMOIRE CONVERSATIONNELLE & VISION)
+# ══════════════════════════════════════════════════════════════
+@bot.tree.command(name="ia", description="Pose une question à l'IA (avec mémoire continue et vision multimodale)")
 @everywhere
 @app_commands.describe(
-    question="Ta question, texte à résumer ou consigne d'analyse",
-    image="Image optionnelle à envoyer pour analyse (PNG, JPG, WEBP...)"
+    question="Ta question, consigne ou texte à analyser",
+    image="Image optionnelle à envoyer pour analyse (PNG, JPG, WEBP, GIF)"
 )
 async def ia_command(
     interaction: discord.Interaction,
@@ -1107,6 +1400,7 @@ async def ia_command(
 ):
     await interaction.response.defer(thinking=True)
     try:
+        uid = str(interaction.user.id)
         img_bytes = None
         mime_type = "image/png"
         if image is not None:
@@ -1120,20 +1414,358 @@ async def ia_command(
             img_bytes = await image.read()
             mime_type = ct if ct.startswith("image/") else "image/png"
 
-        answer = await ask_gemini(question, image_bytes=img_bytes, mime_type=mime_type)
+        # Récupération de l'historique conversationnel (mémoire)
+        history = get_user_memory(uid)
+        system_prompt = (
+            "Tu es Batman, l'assistant ultime de Gotham City. Tu es ultra-intelligent, perspicace, "
+            "bienveillant mais doté d'une prestance légendaire. Tu retiens le fil de la discussion "
+            "et les informations confiées par l'utilisateur pour lui répondre avec précision en français."
+        )
+
+        answer = await ask_gemini(
+            prompt=question,
+            image_bytes=img_bytes,
+            mime_type=mime_type,
+            history=history,
+            system_instruction=system_prompt
+        )
+
+        # Enregistrement dans la mémoire continue de l'utilisateur
+        append_user_memory(uid, question, answer)
+
         if len(answer) > 1900:
             answer = answer[:1900] + "… *(suite tronquée)*"
-        embed = discord.Embed(title="🧠 Réponse IA", description=answer, color=discord.Color.teal())
+
+        embed = discord.Embed(title="🧠 Batman IA", description=answer, color=discord.Color.teal())
         if image is not None:
             embed.set_thumbnail(url=image.url)
-        footer = f"Q: {question[:75]}"
+
+        turns = len(get_user_memory(uid)) // 2
+        footer = f"Q: {question[:65]} • Mémoire: {turns} échange(s)"
         if image is not None:
-            footer += " 📸 (avec image)"
-        footer += " • Propulsé par Gemini"
+            footer += " • 📸 Avec analyse d'image"
         embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
+
+
+class MemoryClearView(discord.ui.View):
+    def __init__(self, uid: str):
+        super().__init__(timeout=120)
+        self.uid = uid
+
+    @discord.ui.button(label="Effacer ma mémoire", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def clear_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.uid:
+            return await interaction.response.send_message("❌ Ce n'est pas ton carnet de mémoire.", ephemeral=True)
+        reset_user_memory(self.uid)
+        button.disabled = True
+        await interaction.response.edit_message(
+            content="🧹 **Mémoire conversationnelle effacée !** Batman repart sur une feuille blanche.",
+            embed=None,
+            view=self
+        )
+
+
+@bot.tree.command(name="ia_memoire", description="Consulte ce que l'IA a en mémoire sur vos conversations")
+@everywhere
+async def ia_memoire(interaction: discord.Interaction):
+    uid = str(interaction.user.id)
+    hist = get_user_memory(uid)
+    style_label = get_user_style_label(uid)
+    style_desc = get_user_style_description(uid)
+
+    turns = len(hist) // 2
+    embed = discord.Embed(
+        title="🧠 Mémoire Conversationnelle de Batman",
+        description="Batman garde en mémoire le fil de vos derniers échanges pour des discussions plus fluides et personnalisées.",
+        color=discord.Color.teal()
+    )
+    embed.add_field(name="💬 Échanges retenus", value=f"**{turns}** / 6 conservés", inline=True)
+    embed.add_field(name="🎨 Ton profil de style", value=f"**{style_label}**", inline=True)
+    embed.add_field(name="📋 Règles actives", value=f"*{style_desc[:250]}*", inline=False)
+
+    if hist:
+        last_turn = hist[-2:]
+        preview = f"**Toi :** {last_turn[0]['text'][:80]}...\n**Batman :** {last_turn[1]['text'][:80]}..."
+        embed.add_field(name="🕒 Dernier échange", value=preview, inline=False)
+    else:
+        embed.add_field(name="🕒 Dernier échange", value="*Aucun échange récent en mémoire.*", inline=False)
+
+    embed.set_footer(text="Utilise /ia_reset pour effacer ta mémoire à tout moment.")
+    view = MemoryClearView(uid) if hist else None
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+@bot.tree.command(name="ia_reset", description="Efface l'historique conversationnel de l'IA")
+@everywhere
+async def ia_reset(interaction: discord.Interaction):
+    uid = str(interaction.user.id)
+    reset_user_memory(uid)
+    await interaction.response.send_message("🧹 **Mémoire conversationnelle réinitialisée !**", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  CLONE DE STYLE & RÉPONDRE À MA PLACE (/mon_style & /reponds)
+# ══════════════════════════════════════════════════════════════
+STYLE_CHOICES = [
+    app_commands.Choice(name="🤙 Familier & Argot urbain", value="familier"),
+    app_commands.Choice(name="🤝 Cool & Amical", value="cool"),
+    app_commands.Choice(name="💼 Professionnel & Courtois", value="pro"),
+    app_commands.Choice(name="🦇 Batman / Sombre & Laconique", value="batman"),
+    app_commands.Choice(name="⚡ Sarcastique & Piquant", value="sarcasme"),
+    app_commands.Choice(name="✍️ Personnalisé (via description)", value="custom")
+]
+
+@bot.tree.command(name="mon_style", description="Configure ou fais analyser ton style d'écriture par l'IA")
+@everywhere
+@app_commands.describe(
+    preset="Choisis un profil préconfiguré ou Personnalisé",
+    description="Exemples de tes messages ou description de ta façon de parler (pour 'Personnalisé')"
+)
+@app_commands.choices(preset=STYLE_CHOICES)
+async def mon_style(
+    interaction: discord.Interaction,
+    preset: app_commands.Choice[str],
+    description: str = None
+):
+    uid = str(interaction.user.id)
+    chosen_key = preset.value
+
+    if chosen_key in PRESET_STYLES and not description:
+        info = PRESET_STYLES[chosen_key]
+        set_user_style(uid, info["label"], info["rules"], "")
+        embed = discord.Embed(
+            title="🎨 Style de langage mis à jour !",
+            description=f"Profil activé : **{info['label']}**\n\n> *« {info['rules']} »*",
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="Ce style sera automatiquement utilisé par /reponds_pour_moi et le clic-droit.")
+        return await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    if not description:
+        return await interaction.response.send_message(
+            "❌ Pour un profil personnalisé, colle quelques exemples de tes messages habituels dans le champ `description` !",
+            ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    try:
+        analysis_prompt = (
+            f"Analyse ces messages/description fournis par un utilisateur Discord :\n"
+            f"« {description} »\n\n"
+            f"Extrais en 2 phrases précises les règles de son style : niveau de langage, tutoiement/vouvoiement, "
+            f"ponctuation, expressions récurrentes, longueur moyenne et utilisation d'emojis."
+        )
+        analyzed_rules = await ask_gemini(analysis_prompt)
+        set_user_style(uid, "✍️ Personnalisé", analyzed_rules, description[:300])
+
+        embed = discord.Embed(
+            title="🧬 Profil de langage analysé avec succès !",
+            description=f"**Règles déduites par l'IA :**\n{analyzed_rules}\n\n"
+                        f"**Exemples analysés :**\n> *« {description[:180]} »*",
+            color=discord.Color.teal()
+        )
+        embed.set_footer(text="Batman utilisera cette empreinte pour générer des réponses en ton nom.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur lors de l'analyse : `{e}`", ephemeral=True)
+
+
+REPLY_INTENTIONS = [
+    app_commands.Choice(name="🎯 Naturel (selon mon style)", value="Répondre de façon naturelle"),
+    app_commands.Choice(name="👍 Accepter avec enthousiasme", value="Accepter avec enthousiasme"),
+    app_commands.Choice(name="🙅 Refuser poliment mais fermement", value="Refuser poliment mais fermement"),
+    app_commands.Choice(name="⏳ Reporter / Gagner du temps", value="Reporter à plus tard avec tact"),
+    app_commands.Choice(name="⚡ Répartie piquante / Humour", value="Répondre avec humour piquant et répartie"),
+    app_commands.Choice(name="💼 Professionnel & Neutre", value="Réponse professionnelle, carrée et neutre")
+]
+
+@bot.tree.command(name="reponds_pour_moi", description="Génère 3 réponses parfaites calibrées sur ton style d'écriture")
+@everywhere
+@app_commands.describe(
+    message="Ce qu'on t'a dit ou le message auquel tu veux répondre",
+    intention="Quelle est ton intention pour cette réponse ?"
+)
+@app_commands.choices(intention=REPLY_INTENTIONS)
+async def reponds_pour_moi(
+    interaction: discord.Interaction,
+    message: str,
+    intention: app_commands.Choice[str] = None
+):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    uid = str(interaction.user.id)
+    user_style = get_user_style_description(uid)
+    style_label = get_user_style_label(uid)
+    intent_text = intention.value if intention else "Répondre de façon naturelle et percutante"
+
+    prompt = f"""Tu es un ghostwriter Discord d'élite. L'utilisateur veut répondre à ce message :
+« {message} »
+
+Intention souhaitée : {intent_text}
+Style habituel de l'utilisateur :
+{user_style}
+
+Génère exactement 3 options de réponses prêtes à l'envoi :
+1. Dans son style personnel (respectant scrupuleusement ses habitudes de langage)
+2. Piquante / Pleine d'esprit (avec du second degré ou une répartie)
+3. Diplomate & Efficace (courte et sans ambiguïté)
+
+FORMAT EXACT :
+===OPT1===
+(texte option 1)
+===OPT2===
+(texte option 2)
+===OPT3===
+(texte option 3)"""
+
+    try:
+        raw = await ask_gemini(prompt)
+        opt1, opt2, opt3 = "", "", ""
+        if "===OPT1===" in raw and "===OPT2===" in raw and "===OPT3===" in raw:
+            parts = raw.split("===OPT1===")[1].split("===OPT2===")
+            opt1 = parts[0].strip()
+            parts2 = parts[1].split("===OPT3===")
+            opt2 = parts2[0].strip()
+            opt3 = parts2[1].strip()
+        else:
+            opt1 = raw[:300].strip()
+            opt2 = "Pas mal, mais je préfère passer mon tour !"
+            opt3 = "Message bien reçu, je reviens vers toi rapidement !"
+
+        embed = discord.Embed(
+            title="💬 Réponses prêtes à l'emploi générées",
+            description=f"**Message reçu :**\n> *« {message[:160]} »*\n\n"
+                        f"**🎯 Option 1 (Ton style : {style_label}) :**\n```\n{opt1}\n```\n"
+                        f"**⚡ Option 2 (Piquante / Drôle) :**\n```\n{opt2}\n```\n"
+                        f"**🤝 Option 3 (Diplomate / Bref) :**\n```\n{opt3}\n```",
+            color=discord.Color.teal()
+        )
+        embed.set_footer(text=f"Intention : {intent_text} • Copie l'option de ton choix !")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  OUTILS DE CONVERSATION : REFORMULATION & RÉPARTIES
+# ══════════════════════════════════════════════════════════════
+REFORMULER_STYLES = [
+    app_commands.Choice(name="💼 Professionnel & Poli", value="Professionnel, courtois, soutenu et sans fautes"),
+    app_commands.Choice(name="⚡ Clash percutant & sans pitié", value="Cinglant, tranchant, répartie affûtée sans insultes"),
+    app_commands.Choice(name="🦇 Batman / Dark Knight", value="Sombre, laconique, percutant et mystérieux"),
+    app_commands.Choice(name="🤝 Diplomate & Apaisant", value="Diplomatique, bienveillant, apaisant et mesuré"),
+    app_commands.Choice(name="😂 Humoristique & Second degré", value="Drôle, auto-dérision, second degré et plein d'esprit"),
+    app_commands.Choice(name="✨ Éloquent & Poétique", value="Vocabulaire riche, poétique, soigné et littéraire"),
+    app_commands.Choice(name="📏 Minimaliste & Direct", value="Ultra court, sans fioriture, direct au but"),
+    app_commands.Choice(name="🔤 Corriger l'orthographe & style", value="Corrige la grammaire, la syntaxe et l'orthographe en restant naturel")
+]
+
+@bot.tree.command(name="reformuler", description="Reformule un texte ou un brouillon dans le style de ton choix")
+@everywhere
+@app_commands.describe(
+    texte="Le texte ou brouillon à reformuler",
+    style="Le style d'écriture souhaité"
+)
+@app_commands.choices(style=REFORMULER_STYLES)
+async def reformuler(
+    interaction: discord.Interaction,
+    texte: str,
+    style: app_commands.Choice[str]
+):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    prompt = (
+        f"Reformule le texte suivant dans ce style : « {style.value} ».\n"
+        f"Conserve l'idée d'origine mais maximise l'impact du message.\n"
+        f"Ne donne QUE le texte final réécrit, sans intro ni commentaires :\n\n{texte}"
+    )
+    try:
+        result = await ask_gemini(prompt)
+        embed = discord.Embed(
+            title=f"✍️ Reformulation ({style.name})",
+            description=f"**Original :**\n> *« {texte} »*\n\n**Résultat :**\n```\n{result[:1800]}\n```",
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="Visible uniquement par toi • Prêt à copier !")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur : `{e}`", ephemeral=True)
+
+
+@bot.tree.command(name="repartie", description="Génère des réparties et punchlines mémorables")
+@everywhere
+@app_commands.describe(
+    sujet="La pique reçue, le sujet ou ce qu'on vient de te dire",
+    intensite="Niveau d'intensité de la répartie"
+)
+@app_commands.choices(intensite=[
+    app_commands.Choice(name="😄 Taquin & Bon enfant", value="taquin"),
+    app_commands.Choice(name="🔥 Piquant & Mordant", value="piquant"),
+    app_commands.Choice(name="⚡ Clash destructeur (sans vulgarité)", value="clash"),
+    app_commands.Choice(name="🦇 Punchline Batman", value="batman")
+])
+async def repartie(
+    interaction: discord.Interaction,
+    sujet: str,
+    intensite: app_commands.Choice[str] = None
+):
+    await interaction.response.defer(thinking=True)
+    lvl = intensite.value if intensite else "piquant"
+    prompt = (
+        f"Génère 3 réparties ou punchlines cinglantes, spirituelles et intelligentes (sans insultes) "
+        f"pour répliquer à cette phrase ou situation : « {sujet} ».\n"
+        f"Niveau d'intensité : {lvl}.\n"
+        f"Présente-les en 3 puces numérotées bien espacées avec des emojis adaptés."
+    )
+    try:
+        res = await ask_gemini(prompt)
+        embed = discord.Embed(
+            title="⚡ Réparties & Punchlines IA",
+            description=f"**En réponse à :**\n> *« {sujet[:150]} »*\n\n{res[:1800]}",
+            color=discord.Color.dark_red()
+        )
+        embed.set_footer(text="Fourni par Batman • À utiliser avec modération 😉")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur : `{e}`")
+
+
+# ══════════════════════════════════════════════════════════════
+#  MODE ABSENCE INTELLIGENT (/afk & /afk_off)
+# ══════════════════════════════════════════════════════════════
+@bot.tree.command(name="afk", description="Active ton mode absence (Batman prévient ceux qui te mentionnent)")
+@everywhere
+@app_commands.describe(raison="La raison de ton absence (ex: repas, dodo, révisions, sport...)")
+async def afk(interaction: discord.Interaction, raison: str = "Absent pour le moment"):
+    uid = str(interaction.user.id)
+    afk_data = load_json(AFK_FILE)
+    afk_data[uid] = {
+        "reason": raison,
+        "since": int(datetime.now().timestamp())
+    }
+    save_json(AFK_FILE, afk_data)
+    embed = discord.Embed(
+        title="💤 Mode AFK activé",
+        description=f"**{interaction.user.display_name}**, je préviendrai automatiquement toute personne qui te mentionne !\n\n"
+                    f"**Raison :** *« {raison} »*",
+        color=discord.Color.dark_grey()
+    )
+    embed.set_footer(text="Ton mode AFK s'enlèvera automatiquement dès que tu renverras un message.")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="afk_off", description="Désactive manuellement ton mode absence")
+@everywhere
+async def afk_off(interaction: discord.Interaction):
+    uid = str(interaction.user.id)
+    afk_data = load_json(AFK_FILE)
+    if uid in afk_data:
+        del afk_data[uid]
+        save_json(AFK_FILE, afk_data)
+        await interaction.response.send_message("✅ Ton mode AFK a été désactivé !", ephemeral=True)
+    else:
+        await interaction.response.send_message("ℹ️ Tu n'étais pas en mode AFK.", ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1149,33 +1781,80 @@ IMAGE_STYLES = [
     app_commands.Choice(name="🕹️ Pixel Art", value="pixel art 32-bit, retro gaming aesthetic")
 ]
 
+IMAGE_RATIOS = [
+    app_commands.Choice(name="⬛ Carré 1:1 (Avatar / Insta)", value="1:1"),
+    app_commands.Choice(name="🖥️ Paysage 16:9 (Fond d'écran)", value="16:9"),
+    app_commands.Choice(name="📱 Portrait 9:16 (Story / Phone)", value="9:16"),
+    app_commands.Choice(name="📐 Standard 4:3", value="4:3"),
+    app_commands.Choice(name="📜 Vertical 3:4", value="3:4")
+]
+
+class GeneratedImageView(discord.ui.View):
+    def __init__(self, author_id: int, prompt: str, style_value: str, style_label: str, aspect_ratio: str = "1:1"):
+        super().__init__(timeout=600)
+        self.author_id = author_id
+        self.prompt = prompt
+        self.style_value = style_value
+        self.style_label = style_label
+        self.aspect_ratio = aspect_ratio
+
+    @discord.ui.button(label="Régénérer", style=discord.ButtonStyle.primary, emoji="🔄")
+    async def regenerate_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Seul l'auteur de la demande peut régénérer cette image.", ephemeral=True)
+        await interaction.response.defer()
+        try:
+            img_bytes, engine = await generate_ai_image(self.prompt, self.style_value, self.aspect_ratio)
+            file = discord.File(io.BytesIO(img_bytes), filename="batman_art.png")
+            embed = discord.Embed(
+                title="🎨 Image générée par l'IA",
+                description=f"**Prompt :** {self.prompt}\n**Style :** {self.style_label}\n**Format :** `{self.aspect_ratio}`",
+                color=discord.Color.dark_theme()
+            )
+            embed.set_image(url="attachment://batman_art.png")
+            embed.set_footer(text=f"Régénéré par {interaction.user.display_name} • Moteur : {engine}")
+            await interaction.message.edit(embed=embed, attachments=[file], view=self)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Erreur lors de la régénération : `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Supprimer", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def delete_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Tu ne peux pas supprimer l'image d'un autre membre.", ephemeral=True)
+        await interaction.message.delete()
+
+
 @bot.tree.command(name="image", description="Génère une image originale par intelligence artificielle")
 @everywhere
 @app_commands.describe(
     description="Ce que tu veux voir sur l'image (ex: Batman contemplant Gotham sous la pluie)",
-    style="Style artistique optionnel pour l'image"
+    style="Style artistique optionnel pour l'image",
+    format="Format ou ratio de l'image (Carré 1:1, Paysage 16:9, Portrait 9:16...)"
 )
-@app_commands.choices(style=IMAGE_STYLES)
+@app_commands.choices(style=IMAGE_STYLES, format=IMAGE_RATIOS)
 async def image_command(
     interaction: discord.Interaction,
     description: str,
-    style: app_commands.Choice[str] = None
+    style: app_commands.Choice[str] = None,
+    format: app_commands.Choice[str] = None
 ):
     await interaction.response.defer(thinking=True)
     try:
         chosen_style = style.value if style else "Naturel"
         style_label = style.name if style else "Standard"
-        img_bytes, engine = await generate_ai_image(description, chosen_style)
+        chosen_ratio = format.value if format else "1:1"
+        img_bytes, engine = await generate_ai_image(description, chosen_style, chosen_ratio)
 
         file = discord.File(io.BytesIO(img_bytes), filename="batman_art.png")
         embed = discord.Embed(
             title="🎨 Image générée par l'IA",
-            description=f"**Prompt :** {description}\n**Style :** {style_label}",
+            description=f"**Prompt :** {description}\n**Style :** {style_label}\n**Format :** `{chosen_ratio}`",
             color=discord.Color.dark_theme()
         )
         embed.set_image(url="attachment://batman_art.png")
         embed.set_footer(text=f"Demandé par {interaction.user.display_name} • Moteur : {engine}")
-        await interaction.followup.send(embed=embed, file=file)
+        view = GeneratedImageView(interaction.user.id, description, chosen_style, style_label, chosen_ratio)
+        await interaction.followup.send(embed=embed, file=file, view=view)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur lors de la génération de l'image : `{e}`")
 
@@ -1186,7 +1865,7 @@ async def image_command(
 async def imagine_command(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer(thinking=True)
     try:
-        img_bytes, engine = await generate_ai_image(prompt, "Naturel")
+        img_bytes, engine = await generate_ai_image(prompt, "Naturel", "1:1")
         file = discord.File(io.BytesIO(img_bytes), filename="imagine_art.png")
         embed = discord.Embed(
             title="✨ Imagination IA",
@@ -1195,7 +1874,8 @@ async def imagine_command(interaction: discord.Interaction, prompt: str):
         )
         embed.set_image(url="attachment://imagine_art.png")
         embed.set_footer(text=f"Demandé par {interaction.user.display_name} • Moteur : {engine}")
-        await interaction.followup.send(embed=embed, file=file)
+        view = GeneratedImageView(interaction.user.id, prompt, "Naturel", "Standard", "1:1")
+        await interaction.followup.send(embed=embed, file=file, view=view)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
 

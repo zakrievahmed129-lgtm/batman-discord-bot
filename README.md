@@ -5,6 +5,8 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 ## 🌟 Fonctionnalités Exceptionnelles
 
 ### 🖱️ Menus Clic-Droit (Apps Discord)
+* **💬 Répondre à ma place** : Analyse le message reçu et génère 3 propositions de réponses adaptées à ton style de langage personnel (avec bouton d'envoi en 1 clic !).
+* **🎭 Analyser ton & sous-entendus** : Décode les non-dits, le ton émotionnel (passif-agressif, ironique, flirteur...) et donne le meilleur conseil pour réagir.
 * **🧠 Résumer avec Batman** : Fais un clic droit sur n'importe quel message pour en obtenir un résumé clair via l'IA !
 * **🔍 Analyser l'image (IA)** : Clic droit sur n'importe quel message contenant une image pour en obtenir une analyse détaillée par Gemini Vision !
 * **📝 Sauvegarder en note** : Clic droit sur un message pour l'enregistrer instantanément dans ton carnet personnel.
@@ -21,9 +23,16 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 * /rappel : Minuteur avec alerte automatique en message privé (MP).
 * /chrono : Minuteur de travail Pomodoro.
 
-### 🧠 Intelligence Artificielle & Création Visuelle
-* /ia question [image] : Pose tes questions à Gemini ou fais-lui analyser une photo/capture jointe avec système anti-panne multimodèle.
-* /image description [style] : Génère une image originale en haute définition via l'IA (choix de styles : Photoréaliste, Batman Noir, Anime, Cyberpunk...).
+### 🧠 Intelligence Artificielle, Clone de Style & Conversation
+* /ia question [image] : Pose tes questions à Gemini avec mémoire continue du fil de discussion et vision multimodale.
+* /ia_memoire : Consulte ce que l'IA a en mémoire sur vos échanges récents.
+* /ia_reset : Efface l'historique conversationnel pour repartir à zéro.
+* /mon_style [preset] [description] : Enregistre ou fais analyser par l'IA tes tics de langage et ta façon de parler pour les réponses automatiques.
+* /reponds_pour_moi message [intention] : Génère 3 réponses parfaites (dans ton style, piquante ou diplomate) prêtes à envoyer.
+* /reformuler texte style : Réécris n'importe quel texte ou brouillon (Professionnel, Clash sans pitié, Batman Noir, Diplomate, Humoristique...).
+* /repartie sujet [intensite] : Génère 3 punchlines et réparties immédiates pour clouer le bec sans vulgarité.
+* /afk [raison] : Active ton mode absence ; Batman prévient automatiquement ceux qui te mentionnent et t'accueille à ton retour.
+* /image description [style] [format] : Génère une image originale en haute définition via l'IA avec boutons de régénération et choix de ratios (1:1, 16:9, 9:16...).
 * /imagine prompt : Raccourci rapide pour générer une illustration artistique par IA.
 * /traduire texte + langue : Traduction instantanée ultra-naturelle dans toutes les langues.
 * /meteo ville : Météo en direct sans clé d'API.
