@@ -36,6 +36,18 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 * /calcul expression : Calculatrice scientifique complète.
 * /batman : Citations et punchlines légendaires du Chevalier Noir.
 
+### 🛡️ Administration & Modération d'Élite (Admin Only)
+* **/clear** `nombre` `[membre]` `[bots_only]` `[contenant]` : Nettoyage chirurgical du salon avec filtres avancés.
+* **/scan_salon** : Audit de sécurité IA complet des 50 derniers messages (score de toxicité, tensions, détection d'arnaques).
+* **/lock** & **/unlock** : Verrouillage et déverrouillage d'urgence du salon (anti-raid).
+* **/slowmode** `secondes` : Règle le mode ralenti en 1 seconde (0 pour désactiver).
+* **/annonce** `titre` `message` `[mention]` `[couleur]` : Diffuse une annonce officielle avec un embed stylé.
+* **/say** `texte` `[salon]` : Fait parler Batman dans n'importe quel salon.
+* **/timeout** & **/untimeout** `membre` `minutes` : Exclusion temporaire (Mute) de 1min à 28 jours.
+* **/kick** & **/ban** `membre` `raison` : Sanctions sécurisées avec boutons interactifs de confirmation.
+* **/audit_membre** `membre` : Fiche d'enquête Bat-Computer complète (ancienneté, permissions clés, alerte alt/raid).
+* **/nuke** : Recrée le salon à neuf pour éradiquer tout le spam en 1 clic (irréversible).
+
 ### 🔄 Statut Rotatif & H24
 Le bot alterne automatiquement ses statuts toutes les 5 minutes (Roblox, Gotham, /aide, /todo) et reste éveillé 24h/24 grâce à son serveur web interne !
 

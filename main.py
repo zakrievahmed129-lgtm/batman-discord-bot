@@ -6,7 +6,7 @@ import random
 import math
 import io
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import aiohttp
 from aiohttp import web
 import discord
@@ -431,7 +431,7 @@ async def generate_ai_image(
 # ══════════════════════════════════════════════════════════════
 HELP_PAGES = [
     {
-        "title": "🦇 Batman — Page 1/4 : Essentiels & Mode Absent",
+        "title": "🦇 Batman — Page 1/5 : Essentiels & Mode Absent",
         "color": discord.Color.dark_theme(),
         "fields": [
             ("🏓 /ping", "Latence en ms, état du bot et uptime en direct.", False),
@@ -443,7 +443,7 @@ HELP_PAGES = [
         ]
     },
     {
-        "title": "🦇 Batman — Page 2/4 : To-Do & Notes Interactives",
+        "title": "🦇 Batman — Page 2/5 : To-Do & Notes Interactives",
         "color": discord.Color.blue(),
         "fields": [
             ("📋 /todo", "Tableau interactif complet : coche d'un clic, ajoute par pop-up, modifie !", False),
@@ -453,7 +453,7 @@ HELP_PAGES = [
         ]
     },
     {
-        "title": "🦇 Batman — Page 3/4 : Utilitaires & Jeux",
+        "title": "🦇 Batman — Page 3/5 : Utilitaires & Jeux",
         "color": discord.Color.purple(),
         "fields": [
             ("📊 /sondage", "`question` + `options` — Crée un sondage interactif avec barres de vote en direct !", False),
@@ -464,7 +464,7 @@ HELP_PAGES = [
         ]
     },
     {
-        "title": "🦇 Batman — Page 4/4 : IA, Images & Clic-Droit 100% Automatique",
+        "title": "🦇 Batman — Page 4/5 : IA, Images & Clic-Droit 100% Automatique",
         "color": discord.Color.teal(),
         "fields": [
             ("🧠 /ia", "`question` + `[image]` — Pose tes questions à Gemini avec mémoire continue et vision.", False),
@@ -473,8 +473,24 @@ HELP_PAGES = [
             ("✍️ /reformuler", "`texte` + `style` — Reformule un message (Pro, Clash, Batman, Diplomate...).", False),
             ("⚡ /repartie", "`sujet` + `[intensite]` — Génère 3 punchlines percutantes.", False),
             ("🌍 /traduire", "`texte` + `langue` — Traduction instantanée ultra-naturelle avec l'IA.", False),
-            ("🖱️ Clic Droit Message ➜ Apps", "• **💬 Répondre à ma place** : Lit la conversation et imite automatiquement ton style !\n• **🎭 Analyser ton & sous-entendus** : Décode les non-dits et le ton émotionnel.\n• **🧠 Résumer avec Batman** : Résume un pavé en 1 clic.\n• **🔍 Analyser l'image (IA)** : Analyse n'importe quelle photo ou capture.\n• **📝 Sauvegarder en note** : Enregistre le message dans ton carnet.", False),
+            ("🖱️ Clic Droit Message ➜ Apps", "• **💬 Répondre à ma place** : Lit la conversation et imite ton identité via Webhook !\n• **🎭 Analyser ton & sous-entendus** : Décode les non-dits et le ton émotionnel.\n• **🧠 Résumer avec Batman** : Résume un pavé en 1 clic.\n• **🔍 Analyser l'image (IA)** : Analyse n'importe quelle photo ou capture.\n• **📝 Sauvegarder en note** : Enregistre le message dans ton carnet.", False),
             ("🖱️ Clic Droit Profil ➜ Apps", "• **🦇 Profil & Avatar HD** : Affiche l'avatar en pleine résolution et les infos de compte.", False),
+        ]
+    },
+    {
+        "title": "🦇 Batman — Page 5/5 : Administration & Bat-Sécurité (Admin)",
+        "color": discord.Color.red(),
+        "fields": [
+            ("🧹 /clear", "`nombre` + `[membre]` + `[bots_only]` + `[contenant]` — Nettoyage intelligent avec filtres.", False),
+            ("🛡️ /scan_salon", "Audit IA de sécurité des 50 derniers messages (toxicité, arnaques, tensions).", False),
+            ("🔒 /lock & /unlock", "`[raison]` — Ferme ou rouvre le salon en urgence en cas de raid/conflit.", False),
+            ("⏱️ /slowmode", "`secondes` — Active ou désactive le mode ralenti en 1 seconde.", False),
+            ("📢 /annonce", "`titre` + `message` + `[mention]` + `[couleur]` — Annonce officielle avec bel embed.", False),
+            ("🗣️ /say", "`texte` + `[salon]` — Fait parler Batman dans n'importe quel salon.", False),
+            ("🔇 /timeout & /untimeout", "`membre` + `minutes` + `[raison]` — Mute temporaire (1min à 28 jours).", False),
+            ("👢 /kick & 🔨 /ban", "`membre` + `[raison]` — Sanctions sécurisées avec boutons de confirmation.", False),
+            ("🕵️ /audit_membre", "`membre` — Fiche d'enquête sur un membre (création, rôles, permissions, risques).", False),
+            ("💥 /nuke", "Recrée le salon à neuf pour éradiquer tout le spam (Irréversible).", False),
         ]
     }
 ]
@@ -671,14 +687,30 @@ class GhostwriterView(discord.ui.View):
         content = f"> 💬 *En réponse à {self.target_message.author.display_name} :*\n{text}"
         sent = False
 
-        # Tentative 1 : Via interaction publique (support User Apps)
-        try:
-            await interaction.response.send_message(content=content, ephemeral=False)
-            sent = True
-        except Exception:
-            pass
+        # Tentative 1 : Via Webhook pour poster avec le vrai nom et l'avatar de l'utilisateur (Clone d'identité !)
+        if interaction.guild and hasattr(interaction.channel, "webhooks"):
+            try:
+                webhooks = await interaction.channel.webhooks()
+                wh = next((w for w in webhooks if w.name == "BatmanGhostwriter" and w.token), None)
+                if not wh:
+                    wh = await interaction.channel.create_webhook(name="BatmanGhostwriter")
 
-        # Tentative 2 : Via channel.send (si le bot est membre du serveur)
+                avatar_url = interaction.user.display_avatar.url
+                username = interaction.user.display_name
+                await wh.send(
+                    content=content,
+                    username=username,
+                    avatar_url=avatar_url
+                )
+                sent = True
+                await interaction.response.send_message(
+                    f"✅ Message envoyé sous ton nom et ton avatar (**{username}**) !",
+                    ephemeral=True
+                )
+            except Exception:
+                pass
+
+        # Tentative 2 : Via channel.send classique si le webhook échoue
         if not sent:
             try:
                 await interaction.channel.send(content=content)
@@ -1867,6 +1899,437 @@ async def imagine_command(interaction: discord.Interaction, prompt: str):
         await interaction.followup.send(embed=embed, file=file, view=view)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
+
+
+# ══════════════════════════════════════════════════════════════
+#  BAT-ADMINISTRATION & MODÉRATION D'ÉLITE (ADMIN ONLY)
+# ══════════════════════════════════════════════════════════════
+
+class ConfirmSanctionView(discord.ui.View):
+    def __init__(self, author_id: int, target: discord.Member, action: str, reason: str, delete_days: int = 0):
+        super().__init__(timeout=60)
+        self.author_id = author_id
+        self.target = target
+        self.action = action
+        self.reason = reason
+        self.delete_days = delete_days
+
+    @discord.ui.button(label="Confirmer la sanction", style=discord.ButtonStyle.danger, emoji="⚠️")
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Tu n'es pas l'auteur de cette commande.", ephemeral=True)
+        try:
+            if self.action == "kick":
+                await self.target.kick(reason=self.reason)
+                emb = discord.Embed(
+                    title="👢 Membre expulsé",
+                    description=f"**{self.target.mention}** a été expulsé par {interaction.user.mention}.\n**Raison :** {self.reason}",
+                    color=discord.Color.red()
+                )
+            else:
+                await self.target.ban(reason=self.reason, delete_message_days=self.delete_days)
+                emb = discord.Embed(
+                    title="🔨 Membre banni définitivement",
+                    description=f"**{self.target.mention}** a été banni par {interaction.user.mention}.\n**Raison :** {self.reason}",
+                    color=discord.Color.dark_red()
+                )
+            self.stop()
+            await interaction.response.edit_message(embed=emb, view=None)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Échec de la sanction : `{e}`", ephemeral=True)
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Tu n'es pas l'auteur de cette commande.", ephemeral=True)
+        self.stop()
+        await interaction.response.edit_message(content="🛑 Action annulée.", embed=None, view=None)
+
+class ConfirmNukeView(discord.ui.View):
+    def __init__(self, author_id: int):
+        super().__init__(timeout=30)
+        self.author_id = author_id
+
+    @discord.ui.button(label="Confirmer le NUKE (Effacer le salon)", style=discord.ButtonStyle.danger, emoji="💥")
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        channel = interaction.channel
+        pos = channel.position
+        try:
+            new_channel = await channel.clone(reason=f"Nuke ordonné par {interaction.user.display_name}")
+            await channel.delete(reason="Nuke channel")
+            await new_channel.edit(position=pos)
+            emb = discord.Embed(
+                title="💥 SALON REMIS À NEUF (NUKE)",
+                description=f"Ce salon a été complètement éradiqué et recréé par {interaction.user.mention} !\nTout le spam et l'historique ont disparu.",
+                color=discord.Color.red()
+            )
+            emb.set_image(url="https://media.giphy.com/media/oe33xf3B50fsc/giphy.gif")
+            await new_channel.send(embed=emb)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Erreur lors du nuke : `{e}`")
+
+    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        self.stop()
+        await interaction.response.edit_message(content="🛑 Nuke annulé avec succès.", embed=None, view=None)
+
+# 1. /clear
+@bot.tree.command(name="clear", description="🧹 Nettoie les messages du salon avec filtres précis (Admin)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(
+    nombre="Nombre de messages à examiner et supprimer (1 à 100)",
+    membre="Supprimer uniquement les messages de ce membre spécifique",
+    bots_only="Supprimer uniquement les messages envoyés par des bots",
+    contenant="Supprimer uniquement les messages contenant ce mot-clé ou texte"
+)
+async def clear(
+    interaction: discord.Interaction,
+    nombre: int = 10,
+    membre: discord.Member = None,
+    bots_only: bool = False,
+    contenant: str = None
+):
+    await interaction.response.defer(ephemeral=True)
+    limit = max(1, min(nombre, 100))
+
+    def check_msg(m: discord.Message) -> bool:
+        if membre and m.author.id != membre.id:
+            return False
+        if bots_only and not m.author.bot:
+            return False
+        if contenant and contenant.lower() not in (m.clean_content or m.content).lower():
+            return False
+        return True
+
+    try:
+        deleted = await interaction.channel.purge(limit=limit, check=check_msg)
+        filt_details = []
+        if membre: filt_details.append(f"de {membre.display_name}")
+        if bots_only: filt_details.append("de bots uniquement")
+        if contenant: filt_details.append(f"contenant « {contenant} »")
+        filt_str = f" ({', '.join(filt_details)})" if filt_details else ""
+
+        embed = discord.Embed(
+            title="🧹 Nettoyage Bat-Sécurité réussi",
+            description=f"**{len(deleted)} message(s)** supprimé(s){filt_str}.",
+            color=discord.Color.green()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur lors du nettoyage : `{e}`", ephemeral=True)
+
+# 2. /scan_salon
+@bot.tree.command(name="scan_salon", description="🛡️ Audit IA de sécurité : analyse l'ambiance et les risques des 50 derniers messages")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+async def scan_salon(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    messages_data = []
+    try:
+        async for m in interaction.channel.history(limit=50):
+            if not m.author.bot and m.clean_content:
+                messages_data.append(f"[{m.author.display_name}]: {m.clean_content[:150]}")
+        messages_data.reverse()
+    except Exception as e:
+        return await interaction.followup.send(f"⚠️ Impossible de lire les messages : `{e}`", ephemeral=True)
+
+    if len(messages_data) < 5:
+        return await interaction.followup.send("❌ Pas assez de messages récents pour un audit pertinent.", ephemeral=True)
+
+    sample_text = "\n".join(messages_data[-35:])
+    prompt = f"""Tu es l'analyste de sécurité et de modération Batman pour ce serveur Discord.
+Voici les derniers messages échangés dans le salon :
+{sample_text}
+
+Effectue un audit rapide et structuré :
+1. Score de Toxicité & Risque (sur 100, ex: 15/100 si calme, 85/100 si embrouille ou spam)
+2. Climat général (Calme, Taquin, Conflit, Trolling, Raid, Scam)
+3. Détection d'anomalies (Insultes, liens suspects, drama, harcèlement)
+4. Conseil tactique pour l'administrateur
+
+Reste concis, clair et percutant dans le style Batman."""
+
+    try:
+        audit_res = await ask_gemini(prompt)
+        embed = discord.Embed(
+            title="🛡️ Bat-Audit de Sécurité du Salon",
+            description=audit_res,
+            color=discord.Color.gold()
+        )
+        embed.set_footer(text=f"Salon : #{interaction.channel.name} • 50 messages analysés")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
+
+# 3. /lock & /unlock
+@bot.tree.command(name="lock", description="🔒 Verrouille le salon (interdit aux membres d'écrire en cas d'urgence)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(raison="Raison du verrouillage (ex: Raid, Spams, Conflit)")
+async def lock(interaction: discord.Interaction, raison: str = "Intervention de la Bat-Sécurité"):
+    try:
+        default_role = interaction.guild.default_role
+        await interaction.channel.set_permissions(default_role, send_messages=False)
+        embed = discord.Embed(
+            title="🔒 Salon Verrouillé",
+            description=f"Ce salon a été temporairement fermé par {interaction.user.mention}.\n**Raison :** {raison}",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        await interaction.response.send_message(f"⚠️ Impossible de verrouiller : `{e}`", ephemeral=True)
+
+@bot.tree.command(name="unlock", description="🔓 Déverrouille le salon")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+async def unlock(interaction: discord.Interaction):
+    try:
+        default_role = interaction.guild.default_role
+        await interaction.channel.set_permissions(default_role, send_messages=None)
+        embed = discord.Embed(
+            title="🔓 Salon Déverrouillé",
+            description="Le calme est rétabli. Vous pouvez à nouveau écrire dans ce salon.",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        await interaction.response.send_message(f"⚠️ Impossible de déverrouiller : `{e}`", ephemeral=True)
+
+# 4. /slowmode
+@bot.tree.command(name="slowmode", description="⏱️ Règle le mode ralenti du salon")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(secondes="Délai d'attente en secondes entre chaque message (0 pour désactiver, max 21600)")
+async def slowmode(interaction: discord.Interaction, secondes: int = 5):
+    sec = max(0, min(secondes, 21600))
+    try:
+        await interaction.channel.edit(slowmode_delay=sec)
+        if sec == 0:
+            msg = "⚡ Mode ralenti **désactivé** sur ce salon."
+            col = discord.Color.green()
+        else:
+            msg = f"⏱️ Mode ralenti configuré à **{sec} seconde(s)** par message."
+            col = discord.Color.orange()
+        embed = discord.Embed(description=msg, color=col)
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        await interaction.response.send_message(f"⚠️ Erreur : `{e}`", ephemeral=True)
+
+# 5. /annonce
+ADMIN_COLOR_CHOICES = [
+    app_commands.Choice(name="🖤 Noir Batman", value="dark"),
+    app_commands.Choice(name="🟡 Or / Jaune", value="gold"),
+    app_commands.Choice(name="🔴 Rouge Alerte", value="red"),
+    app_commands.Choice(name="🔵 Bleu Électrique", value="blue"),
+    app_commands.Choice(name="🟢 Vert Succès", value="green"),
+    app_commands.Choice(name="🟣 Violet Mystique", value="purple"),
+]
+
+ADMIN_COLOR_MAP = {
+    "dark": discord.Color.dark_theme(),
+    "gold": discord.Color.gold(),
+    "red": discord.Color.red(),
+    "blue": discord.Color.blue(),
+    "green": discord.Color.green(),
+    "purple": discord.Color.purple(),
+}
+
+@bot.tree.command(name="annonce", description="📢 Publie une annonce officielle de haut niveau")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(
+    titre="Titre principal de l'annonce",
+    message="Contenu de l'annonce (supports markdown, emojis)",
+    couleur="Couleur d'accent de l'annonce",
+    mention="Mentionner un groupe de membres",
+    salon="Salon où diffuser l'annonce (ce salon par défaut)"
+)
+@app_commands.choices(
+    couleur=ADMIN_COLOR_CHOICES,
+    mention=[
+        app_commands.Choice(name="Aucune mention", value="none"),
+        app_commands.Choice(name="@everyone (Tous les membres)", value="everyone"),
+        app_commands.Choice(name="@here (Membres connectés)", value="here")
+    ]
+)
+async def annonce(
+    interaction: discord.Interaction,
+    titre: str,
+    message: str,
+    couleur: app_commands.Choice[str] = None,
+    mention: app_commands.Choice[str] = None,
+    salon: discord.TextChannel = None
+):
+    target_channel = salon or interaction.channel
+    c_color = ADMIN_COLOR_MAP.get(couleur.value, discord.Color.gold()) if couleur else discord.Color.gold()
+
+    embed = discord.Embed(
+        title=f"📢 {titre}",
+        description=message,
+        color=c_color,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_author(name=interaction.guild.name, icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+    embed.set_footer(text=f"Annonce officielle par {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+
+    ping_text = ""
+    if mention and mention.value == "everyone":
+        ping_text = "@everyone"
+    elif mention and mention.value == "here":
+        ping_text = "@here"
+
+    try:
+        await target_channel.send(content=ping_text if ping_text else None, embed=embed)
+        await interaction.response.send_message(f"✅ Annonce publiée dans {target_channel.mention} !", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"⚠️ Impossible d'envoyer l'annonce : `{e}`", ephemeral=True)
+
+# 6. /say
+@bot.tree.command(name="say", description="🗣️ Envoie un message via Batman dans un salon")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(texte="Le texte à faire dire par Batman", salon="Salon cible (optionnel)")
+async def say(interaction: discord.Interaction, texte: str, salon: discord.TextChannel = None):
+    target = salon or interaction.channel
+    try:
+        await target.send(texte)
+        await interaction.response.send_message(f"✅ Message envoyé dans {target.mention} !", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"⚠️ Impossible d'envoyer : `{e}`", ephemeral=True)
+
+# 7. /timeout & /untimeout
+@bot.tree.command(name="timeout", description="🔇 Isole un membre temporairement (Mute)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(
+    membre="Le membre à mettre en sourdine",
+    minutes="Durée en minutes (ex: 5, 60, 1440 pour 1 jour)",
+    raison="Raison de la sanction"
+)
+async def timeout_member(interaction: discord.Interaction, membre: discord.Member, minutes: int = 10, raison: str = "Non-respect des règles"):
+    if membre.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message("❌ Tu ne peux pas sanctionner un membre ayant un rôle supérieur ou égal au tien.", ephemeral=True)
+
+    mins = max(1, min(minutes, 40320))
+    until = datetime.now(timezone.utc) + timedelta(minutes=mins)
+    try:
+        await membre.timeout(until, reason=raison)
+        embed = discord.Embed(
+            title="🔇 Membre Mis en Sourdine",
+            description=f"**{membre.mention}** a été exclu temporairement pendant **{mins} minute(s)**.\n**Raison :** {raison}",
+            color=discord.Color.orange()
+        )
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        await interaction.response.send_message(f"⚠️ Erreur : `{e}`", ephemeral=True)
+
+@bot.tree.command(name="untimeout", description="🔊 Rétablit la parole d'un membre")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(membre="Le membre à libérer de sourdine")
+async def untimeout_member(interaction: discord.Interaction, membre: discord.Member):
+    try:
+        await membre.timeout(None, reason=f"Levé par {interaction.user.display_name}")
+        await interaction.response.send_message(f"🔊 {membre.mention} peut à nouveau parler !", ephemeral=False)
+    except Exception as e:
+        await interaction.response.send_message(f"⚠️ Erreur : `{e}`", ephemeral=True)
+
+# 8. /kick & /ban
+@bot.tree.command(name="kick", description="👢 Expulse un membre du serveur (avec confirmation)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(membre="Membre à expulser", raison="Raison de l'expulsion")
+async def kick_cmd(interaction: discord.Interaction, membre: discord.Member, raison: str = "Non-respect des règles"):
+    if membre.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message("❌ Tu ne peux pas expulser un membre supérieur ou égal à toi.", ephemeral=True)
+    embed = discord.Embed(
+        title="⚠️ Confirmation d'Expulsion",
+        description=f"Es-tu certain de vouloir expulser **{membre.display_name}** ({membre.mention}) ?\n**Raison :** {raison}",
+        color=discord.Color.orange()
+    )
+    view = ConfirmSanctionView(interaction.user.id, membre, "kick", raison)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+@bot.tree.command(name="ban", description="🔨 Bannit définitivement un membre du serveur (avec confirmation)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(
+    membre="Membre à bannir",
+    raison="Raison du bannissement",
+    supprimer_jours_messages="Supprimer l'historique de ses messages (0 à 7 jours)"
+)
+async def ban_cmd(interaction: discord.Interaction, membre: discord.Member, raison: str = "Violation grave des règles", supprimer_jours_messages: int = 1):
+    if membre.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
+        return await interaction.response.send_message("❌ Tu ne peux pas bannir un membre supérieur ou égal à toi.", ephemeral=True)
+    days = max(0, min(supprimer_jours_messages, 7))
+    embed = discord.Embed(
+        title="🚨 Confirmation de Bannissement Définitif",
+        description=f"Es-tu certain de vouloir **bannir définitivement** {membre.mention} ({membre.display_name}) ?\n"
+                    f"**Raison :** {raison}\n"
+                    f"**Suppression des messages :** {days} jour(s)",
+        color=discord.Color.red()
+    )
+    view = ConfirmSanctionView(interaction.user.id, membre, "ban", raison, delete_days=days)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+# 9. /audit_membre
+@bot.tree.command(name="audit_membre", description="🕵️ Fiche d'enquête Bat-Computer sur un membre")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+@app_commands.describe(membre="Le membre à enquêter")
+async def audit_membre(interaction: discord.Interaction, membre: discord.Member):
+    created_ts = int(membre.created_at.timestamp())
+    joined_ts = int(membre.joined_at.timestamp()) if membre.joined_at else None
+
+    account_age_days = (datetime.now(timezone.utc) - membre.created_at).days
+    is_suspicious = account_age_days < 7
+
+    roles_list = [r.mention for r in membre.roles if r.name != "@everyone"]
+    roles_str = ", ".join(roles_list) if roles_list else "Aucun rôle particulier"
+
+    perms = membre.guild_permissions
+    key_perms = []
+    if perms.administrator: key_perms.append("👑 Administrateur")
+    if perms.manage_guild: key_perms.append("🏛️ Gérer le serveur")
+    if perms.ban_members: key_perms.append("🔨 Bannir des membres")
+    if perms.kick_members: key_perms.append("👢 Expulser des membres")
+    if perms.manage_messages: key_perms.append("🧹 Gérer les messages")
+    if perms.mention_everyone: key_perms.append("📢 Mentionner everyone")
+    perms_str = "\n".join(f"• {p}" for p in key_perms) if key_perms else "• Membre standard (sans permissions sensibles)"
+
+    embed = discord.Embed(
+        title=f"🕵️ Bat-Fiche d'Enquête : {membre.display_name}",
+        color=discord.Color.red() if is_suspicious else discord.Color.dark_theme()
+    )
+    embed.set_thumbnail(url=membre.display_avatar.url)
+    embed.add_field(name="👤 Identité", value=f"**Pseudo :** {membre.name}\n**ID :** `{membre.id}`\n**Mention :** {membre.mention}", inline=False)
+    embed.add_field(name="📅 Dates Clés", value=f"• **Compte créé le :** <t:{created_ts}:D> (<t:{created_ts}:R>)\n• **A rejoint le :** <t:{joined_ts}:D> (<t:{joined_ts}:R>)" if joined_ts else f"• **Compte créé le :** <t:{created_ts}:D>", inline=False)
+
+    if is_suspicious:
+        embed.add_field(name="⚠️ Alerte de Sécurité", value="🚨 **Compte créé il y a moins de 7 jours !** Risque potentiel de double-compte (alt) ou de raid.", inline=False)
+
+    embed.add_field(name=f"🏷️ Rôles ({len(roles_list)})", value=roles_str[:1020], inline=False)
+    embed.add_field(name="🔑 Permissions Sensibles", value=perms_str, inline=False)
+    embed.set_footer(text=f"Demandé par {interaction.user.display_name}")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# 10. /nuke
+@bot.tree.command(name="nuke", description="💥 Recrée ce salon à neuf pour éradiquer tout le spam (Irréversible)")
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+async def nuke(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="⚠️ ATTENTION : ALERTE NUKE",
+        description=f"Tu es sur le point de **supprimer l'intégralité des messages de ce salon (#{interaction.channel.name})** en le recréant à l'identique !\n\nCette action est **100% irréversible**.",
+        color=discord.Color.red()
+    )
+    view = ConfirmNukeView(interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════
