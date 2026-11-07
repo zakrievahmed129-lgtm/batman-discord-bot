@@ -51,20 +51,15 @@ Le bot alterne automatiquement ses statuts toutes les 5 minutes (Roblox, Gotham,
 3. Ajoute tes variables secrètes dans l'onglet **Environment** :
    * `DISCORD_TOKEN` : Ton token de bot Discord
    * `GEMINI_API_KEY` : Ta clé d'API Google AI Studio (gratuite)
-   * `PORT` : `8080` (automatique sur Render)
+   * `PORT` : `10000` (automatique sur Render)
 4. Déploie ! Ton bot Batman sera en ligne 24h/24 avec toutes ses commandes synchronisées.
 
 ---
 
-## 🚀 Déploiement Facile (H24 Gratuit sur Render)
-
-1. Crée un nouveau **Web Service** sur [Render.com](https://render.com) en connectant ce dépôt GitHub.
-2. Configure les paramètres suivants :
-   * **Runtime** : `Python 3`
-   * **Build Command** : `pip install -r requirements.txt`
-   * **Start Command** : `python main.py`
-3. Ajoute tes variables secrètes dans l'onglet **Environment** :
-   * `DISCORD_TOKEN` : Ton token de bot Discord
-   * `GEMINI_API_KEY` : Ta clé d'API Google AI Studio (gratuite)
-   * `PORT` : `8080` (automatique sur Render)
-4. Déploie ! Ton bot Batman sera en ligne 24h/24 avec toutes ses commandes synchronisées.
+## 🔗 Inviter Batman sur ton serveur
+1. Sur le [Discord Developer Portal](https://discord.com/developers/applications), va dans **OAuth2 ➔ URL Generator**.
+2. Coche uniquement :
+   * **Scopes** : `bot` et `applications.commands`
+   * **Bot Permissions** : `Administrateur` (ou `Envoyer des messages`, `Voir les anciens messages`, `Intégrer des liens`).
+3. Ouvre le lien généré dans ton navigateur et sélectionne ton serveur.
+4. Dans l'onglet **Bot**, active la case **Message Content Intent** sous *Privileged Gateway Intents* pour permettre l'apprentissage de ton style en temps réel !
