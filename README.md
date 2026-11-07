@@ -4,13 +4,13 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 
 ## 🌟 Fonctionnalités Exceptionnelles
 
-### 🖱️ Menus Clic-Droit (Apps Discord)
-* **💬 Répondre à ma place** : Analyse le message reçu et génère 3 propositions de réponses adaptées à ton style de langage personnel (avec bouton d'envoi en 1 clic !).
-* **🎭 Analyser ton & sous-entendus** : Décode les non-dits, le ton émotionnel (passif-agressif, ironique, flirteur...) et donne le meilleur conseil pour réagir.
-* **🧠 Résumer avec Batman** : Fais un clic droit sur n'importe quel message pour en obtenir un résumé clair via l'IA !
-* **🔍 Analyser l'image (IA)** : Clic droit sur n'importe quel message contenant une image pour en obtenir une analyse détaillée par Gemini Vision !
-* **📝 Sauvegarder en note** : Clic droit sur un message pour l'enregistrer instantanément dans ton carnet personnel.
-* **🦇 Profil & Avatar HD** : Clic droit sur un membre pour voir sa date de création et télécharger son avatar en haute définition.
+### 🖱️ Menus Clic-Droit 100% Furtifs (Apps Discord Personnelles)
+* **💬 Répondre à ma place (Studio Ghostwriter V2)** : Lit automatiquement le fil de la discussion (texte, **message vocal** ou **image**), imite ton vrai style (même en langue étrangère !) et t'offre des boutons interactifs : `📋 Copier 1/2/3` (pour coller depuis ton vrai compte sans jamais afficher le bot), `✍️ Guider` (pop-up), `📱 Mode SMS`, `🔥 Piquant` et `🔄 Autres`.
+* **🧠 Résumer avec Batman** : **Écoute les messages vocaux en cachette** (transcription + résumé sans lancer l'audio !), résume les PDF/fichiers, les longs pavés ou rattrape les 25 derniers messages d'une discussion manquée.
+* **🎭 Analyser ton & sous-entendus** : Décode l'ironie, les excuses/mythos, l'intérêt caché (même à l'intonation d'un vocal !) + bouton direct pour préparer 3 réponses adaptées.
+* **🔍 Analyser l'image (IA)** : Mode furtif qui résout un devoir/exercice pris en photo, lit le texte (OCR) ou explique un mème sans que personne dans le chat ne le voie.
+* **📝 Sauvegarder en note** : Enregistre un message ou fichier dans ton carnet personnel en 1 clic.
+* **🦇 Profil & Avatar HD** : Clic droit sur un profil pour voir l'âge exact du compte et télécharger son avatar HD.
 
 ### 🎮 Mini-Jeux & Sondages Interactifs
 * /morpion [adversaire] : Une vraie grille 3x3 jouable avec des boutons directement dans Discord.
@@ -23,30 +23,15 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 * /rappel : Minuteur avec alerte automatique en message privé (MP).
 * /chrono : Minuteur de travail Pomodoro.
 
-### 🧠 Intelligence Artificielle & Outils Automatiques
-* **Analyse & Clonage 100% Automatique** : Aucun paramétrage nécessaire ! Batman apprend automatiquement ta façon d'écrire quand tu parles dans le chat et lit le fil des discussions en direct.
-* /ia question [image] : Pose tes questions à Gemini avec mémoire continue et analyse d'image/photo.
-* /image description [style] [format] : Génère une image originale en haute définition via l'IA avec boutons interactifs de régénération et choix de ratios.
-* /imagine prompt : Raccourci rapide pour générer une illustration artistique par IA.
-* /reformuler texte style : Réécris n'importe quel texte ou brouillon (Professionnel, Clash, Batman, Diplomate...).
-* /repartie sujet [intensite] : Génère 3 punchlines percutantes sans vulgarité.
-* /afk [raison] : Active ton mode absence ; Batman prévient automatiquement ceux qui te mentionnent et t'accueille à ton retour.
-* /traduire texte + langue : Traduction instantanée ultra-naturelle dans toutes les langues.
-* /meteo ville : Météo en direct sans clé d'API.
-* /calcul expression : Calculatrice scientifique complète.
-* /batman : Citations et punchlines légendaires du Chevalier Noir.
-
-### 🛡️ Administration & Modération d'Élite (Admin Only)
-* **/clear** `nombre` `[membre]` `[bots_only]` `[contenant]` : Nettoyage chirurgical du salon avec filtres avancés.
-* **/scan_salon** : Audit de sécurité IA complet des 50 derniers messages (score de toxicité, tensions, détection d'arnaques).
-* **/lock** & **/unlock** : Verrouillage et déverrouillage d'urgence du salon (anti-raid).
-* **/slowmode** `secondes` : Règle le mode ralenti en 1 seconde (0 pour désactiver).
-* **/annonce** `titre` `message` `[mention]` `[couleur]` : Diffuse une annonce officielle avec un embed stylé.
-* **/say** `texte` `[salon]` : Fait parler Batman dans n'importe quel salon.
-* **/timeout** & **/untimeout** `membre` `minutes` : Exclusion temporaire (Mute) de 1min à 28 jours.
-* **/kick** & **/ban** `membre` `raison` : Sanctions sécurisées avec boutons interactifs de confirmation.
-* **/audit_membre** `membre` : Fiche d'enquête Bat-Computer complète (ancienneté, permissions clés, alerte alt/raid).
-* **/nuke** : Recrée le salon à neuf pour éradiquer tout le spam en 1 clic (irréversible).
+### 🧠 Intelligence Artificielle & Super-Pouvoirs Personnels
+* **Analyse & Clonage 100% Automatique** : Aucun paramétrage nécessaire ! Batman apprend ta façon d'écrire automatiquement et lit le fil des discussions.
+* **/ia** `question` `[fichier]` `[prive]` : Gemini connecté à **Google Search en direct** + lecture d'Images, Messages Vocaux, PDF et Code (en mode furtif par défaut !).
+* **/verifier** `affirmation` : **Détecteur de mytho & Fact-Check Google en direct** en mode furtif, avec preuves et réplique prête à copier.
+* **/image** & **/imagine** : Génère des visuels Haute Définition par IA avec choix de formats (1:1, 16:9, 9:16) et régénération.
+* **/reformuler** `texte` `style` : Réécrit ou corrige ton message en privé (SMS Discord naturel, Zéro faute, Pro, Clash...).
+* **/repartie** `sujet` `[intensite]` : Génère 3 punchlines naturelles en mode 100% furtif.
+* **/afk** `[raison]` : Mode absence intelligent.
+* **/traduire**, **/meteo**, **/calcul**, **/batman** : Tous tes outils quotidiens accessibles partout (MP, groupes et serveurs).
 
 ### 🔄 Statut Rotatif & H24
 Le bot alterne automatiquement ses statuts toutes les 5 minutes (Roblox, Gotham, /aide, /todo) et reste éveillé 24h/24 grâce à son serveur web interne !

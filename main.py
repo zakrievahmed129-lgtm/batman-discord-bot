@@ -176,39 +176,50 @@ async def on_message(message: discord.Message):
     is_dm = message.guild is None
     is_mentioned = (bot.user in message.mentions) if bot.user else False
 
-    if (is_dm or is_mentioned) and content and not content.startswith(("/", "!", ".")):
-        clean_text = content
+    if (is_dm or is_mentioned) and (content or message.attachments) and not (content or "").startswith(("/", "!", ".")):
+        clean_text = content or ""
         if is_mentioned and bot.user:
             clean_text = clean_text.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
 
-        if clean_text:
-            img_bytes = None
-            mime = "image/png"
-            if message.attachments:
-                att = message.attachments[0]
-                if any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]):
-                    try:
-                        img_bytes = await att.read()
-                        mime = att.content_type or "image/png"
-                    except Exception:
-                        pass
+        file_bytes = None
+        mime = "image/png"
+        extra_file_text = None
+        kind_label = None
+        if message.attachments:
+            try:
+                file_bytes, mime, extra_file_text, kind_label = await extract_attachment_payload(message.attachments[0])
+            except Exception:
+                pass
 
+        if not clean_text and (file_bytes or extra_file_text):
+            if kind_label and "Vocal" in kind_label:
+                clean_text = "Écoute ce message vocal, transcris l'essentiel et réponds-moi ou résume-le clairement."
+            elif kind_label and "Image" in kind_label:
+                clean_text = "Analyse cette image en détail (s'il y a un exercice, du texte ou une question dessus, résous-le ou explique-le)."
+            else:
+                clean_text = "Analyse et résume clairement le contenu de ce document."
+
+        if extra_file_text:
+            clean_text = f"{clean_text}\n\n--- CONTENU DU FICHIER JOINT ---\n{extra_file_text}"
+
+        if clean_text:
             try:
                 async with message.channel.typing():
                     history = get_user_memory(uid)
                     system_prompt = (
-                        f"Tu es Batman, l'assistant loyal et protecteur de {message.author.display_name}. "
-                        "Tu t'exprimes avec l'assurance, la vivacité et la bienveillance du Chevalier Noir : "
-                        "voix calme, percutante, légèrement mystérieuse, hyper efficace et toujours prêt à aider."
+                        f"Tu es Batman, l'assistant personnel loyal et ultra-intelligent de {message.author.display_name}. "
+                        "Tu t'exprimes avec assurance, clarté et efficacité : direct, pertinent, toujours prêt à résoudre "
+                        "un problème, vérifier une info en direct ou analyser un fichier/vocal/image."
                     )
                     reply_text = await ask_gemini(
                         prompt=clean_text,
-                        image_bytes=img_bytes,
-                        mime_type=mime,
+                        image_bytes=file_bytes,
+                        mime_type=mime or "image/png",
                         history=history,
-                        system_instruction=system_prompt
+                        system_instruction=system_prompt,
+                        use_search=(file_bytes is None)
                     )
-                    append_user_memory(uid, clean_text, reply_text)
+                    append_user_memory(uid, clean_text[:600], reply_text)
 
                     if len(reply_text) <= 2000:
                         await message.reply(reply_text)
@@ -234,14 +245,46 @@ def everywhere(cmd):
     return cmd
 
 # ══════════════════════════════════════════════════════════════
-#  HELPERS IA : GEMINI (VISION & TEXTE) + MÉMOIRE CONVERSATIONNELLE
+#  HELPERS IA : GEMINI (VISION, VOCAUX, PDF, RECHERCHE WEB) + MÉMOIRE
 # ══════════════════════════════════════════════════════════════
+async def extract_attachment_payload(att: discord.Attachment):
+    """Extrait (bytes_data, mime_type, text_content, kind_label) d'une pièce jointe Discord (image, vocal, PDF, texte/code)."""
+    ct = (att.content_type or "").split(";")[0].strip().lower()
+    fn = att.filename.lower()
+
+    if ct.startswith("image/") or fn.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+        data = await att.read()
+        mime = ct if ct.startswith("image/") else ("image/jpeg" if fn.endswith((".jpg", ".jpeg")) else "image/png")
+        return data, mime, None, "📸 Image"
+
+    if ct.startswith("audio/") or fn.endswith((".ogg", ".mp3", ".wav", ".m4a", ".opus", ".aac", ".webm")):
+        data = await att.read()
+        mime = ct if ct.startswith("audio/") else (
+            "audio/ogg" if fn.endswith((".ogg", ".opus")) else
+            "audio/mpeg" if fn.endswith(".mp3") else
+            "audio/mp4" if fn.endswith(".m4a") else "audio/wav"
+        )
+        return data, mime, None, "🎙️ Message vocal / Audio"
+
+    if ct == "application/pdf" or fn.endswith(".pdf"):
+        data = await att.read()
+        return data, "application/pdf", None, "📄 Document PDF"
+
+    if ct.startswith("text/") or fn.endswith((".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".html", ".css", ".lua", ".sql", ".xml", ".yaml", ".yml", ".log")):
+        raw = await att.read()
+        txt = raw.decode("utf-8", errors="replace")[:15000]
+        return None, None, txt, f"📝 Fichier ({att.filename})"
+
+    return None, None, None, None
+
+
 async def ask_gemini(
     prompt: str,
     image_bytes: bytes = None,
     mime_type: str = "image/png",
     history: list = None,
-    system_instruction: str = None
+    system_instruction: str = None,
+    use_search: bool = False
 ) -> str:
     key = os.getenv("GEMINI_API_KEY")
     if not key:
@@ -269,7 +312,7 @@ async def ask_gemini(
             if t:
                 contents.append(types.Content(role=r, parts=[types.Part.from_text(text=t)]))
 
-    # 2. Tour actuel (texte + image optionnelle)
+    # 2. Tour actuel (texte + média optionnel : image, audio/vocal, PDF)
     user_parts = []
     if image_bytes:
         clean_mime = mime_type.split(";")[0].strip() if mime_type else "image/png"
@@ -277,12 +320,28 @@ async def ask_gemini(
     user_parts.append(types.Part.from_text(text=prompt))
     contents.append(types.Content(role="user", parts=user_parts))
 
-    config = types.GenerateContentConfig(system_instruction=system_instruction) if system_instruction else None
+    base_config = types.GenerateContentConfig(system_instruction=system_instruction) if system_instruction else None
+    search_config = None
+    if use_search and not image_bytes:
+        try:
+            cfg_kwargs = {"tools": [types.Tool(google_search=types.GoogleSearch())]}
+            if system_instruction:
+                cfg_kwargs["system_instruction"] = system_instruction
+            search_config = types.GenerateContentConfig(**cfg_kwargs)
+        except Exception:
+            search_config = None
 
     last_err = None
     for m in models:
+        if search_config is not None:
+            try:
+                resp = await client.aio.models.generate_content(model=m, contents=contents, config=search_config)
+                if resp.text:
+                    return resp.text.strip()
+            except Exception as e:
+                last_err = e
         try:
-            resp = await client.aio.models.generate_content(model=m, contents=contents, config=config)
+            resp = await client.aio.models.generate_content(model=m, contents=contents, config=base_config)
             if resp.text:
                 return resp.text.strip()
         except Exception as e:
@@ -431,66 +490,48 @@ async def generate_ai_image(
 # ══════════════════════════════════════════════════════════════
 HELP_PAGES = [
     {
-        "title": "🦇 Batman — Page 1/5 : Essentiels & Mode Absent",
+        "title": "🦇 Batman — Page 1/4 : Assistant Personnel & Quotidien",
         "color": discord.Color.dark_theme(),
         "fields": [
+            ("💬 MP Directs avec Batman", "Écris-lui ou envoie-lui un **vocal, PDF ou photo** en MP sans commande : il répond avec mémoire + Google !", False),
             ("🏓 /ping", "Latence en ms, état du bot et uptime en direct.", False),
-            ("💤 /afk", "`[raison]` — Active ton mode absence ; Batman prévient automatiquement ceux qui te mentionnent.", False),
+            ("💤 /afk", "`[raison]` — Active ton mode absence ; Batman prévient ceux qui te mentionnent.", False),
             ("⏰ /rappel", "`duree` + `message` — Rappel automatique livré en MP (ex: 10m, 2h, 1j).", False),
-            ("🦇 /batman", "Punchlines et citations légendaires du Chevalier Noir.", False),
-            ("🎲 /dice", "`faces` + `nombre` — Lance des dés pour le fun ou les jeux de rôle.", False),
-            ("📊 /stats", "Statistiques de ton compte (tâches, notes, uptime).", False),
+            ("📋 /todo & 📝 /note", "Gestionnaire de tâches et carnet de notes personnel interactif.", False),
         ]
     },
     {
-        "title": "🦇 Batman — Page 2/5 : To-Do & Notes Interactives",
-        "color": discord.Color.blue(),
-        "fields": [
-            ("📋 /todo", "Tableau interactif complet : coche d'un clic, ajoute par pop-up, modifie !", False),
-            ("➕ /todo_ajouter", "`tache` — Ajout ultra-rapide sans ouvrir le tableau.", False),
-            ("📝 /note", "Dashboard de notes : consulte, ajoute via formulaire, ou supprime.", False),
-            ("📌 /note_ajouter", "`titre` + `contenu` — Sauvegarde rapide d'une idée.", False),
-        ]
-    },
-    {
-        "title": "🦇 Batman — Page 3/5 : Utilitaires & Jeux",
-        "color": discord.Color.purple(),
-        "fields": [
-            ("📊 /sondage", "`question` + `options` — Crée un sondage interactif avec barres de vote en direct !", False),
-            ("🎮 /morpion", "Joue au Morpion (Tic-Tac-Toe) directement dans le chat avec 9 boutons !", False),
-            ("⏱️ /chrono", "`duree` + `nom` — Minuteur Pomodoro qui t'alerte dès la fin.", False),
-            ("🌤️ /meteo", "`ville` — Météo en temps réel sans clé d'API.", False),
-            ("📈 /calcul", "`expression` — Calculatrice avancée avec fonctions mathématiques.", False),
-        ]
-    },
-    {
-        "title": "🦇 Batman — Page 4/5 : IA, Images & Clic-Droit 100% Automatique",
+        "title": "🦇 Batman — Page 2/4 : Super-Pouvoirs Clic-Droit (100% Furtifs)",
         "color": discord.Color.teal(),
         "fields": [
-            ("🧠 /ia", "`question` + `[image]` — Pose tes questions à Gemini avec mémoire continue et vision.", False),
-            ("🎨 /image", "`description` + `[style]` + `[format]` — Génère une image IA en haute définition.", False),
-            ("✨ /imagine", "`prompt` — Raccourci pour générer une illustration artistique par IA.", False),
-            ("✍️ /reformuler", "`texte` + `style` — Reformule un message (Pro, Clash, Batman, Diplomate...).", False),
-            ("⚡ /repartie", "`sujet` + `[intensite]` — Génère 3 punchlines percutantes.", False),
-            ("🌍 /traduire", "`texte` + `langue` — Traduction instantanée ultra-naturelle avec l'IA.", False),
-            ("🖱️ Clic Droit Message ➜ Apps", "• **💬 Répondre à ma place** : Lit la conversation et imite ton identité via Webhook !\n• **🎭 Analyser ton & sous-entendus** : Décode les non-dits et le ton émotionnel.\n• **🧠 Résumer avec Batman** : Résume un pavé en 1 clic.\n• **🔍 Analyser l'image (IA)** : Analyse n'importe quelle photo ou capture.\n• **📝 Sauvegarder en note** : Enregistre le message dans ton carnet.", False),
-            ("🖱️ Clic Droit Profil ➜ Apps", "• **🦇 Profil & Avatar HD** : Affiche l'avatar en pleine résolution et les infos de compte.", False),
+            ("💬 Répondre à ma place", "Lit la discussion (texte, **vocal** ou **image**), imite ton style (même en langue étrangère !) avec studio interactif : `📱 Mode SMS`, `✍️ Guider`, `🔥 Piquant` & copie 1-clic.", False),
+            ("🧠 Résumer avec Batman", "**Écoute les messages vocaux en cachette**, lit les PDF/fichiers, résume les longs pavés ou rattrape la discussion manquée !", False),
+            ("🎭 Analyser ton & sous-entendus", "Décode l'ironie, les excuses/mythos, l'intérêt caché (même à la voix !) + bouton pour générer 3 réponses.", False),
+            ("🔍 Analyser l'image (IA)", "Analyse furtive : résout un **devoir/exo en photo**, lit le texte (OCR) ou explique un mème.", False),
+            ("📝 Sauvegarder / 🦇 Avatar HD", "Enregistre un message en note ou récupère l'avatar HD et l'âge du compte d'un profil.", False),
         ]
     },
     {
-        "title": "🦇 Batman — Page 5/5 : Administration & Bat-Sécurité (Admin)",
-        "color": discord.Color.red(),
+        "title": "🦇 Batman — Page 3/4 : IA Multimodale, Fact-Check & Images HD",
+        "color": discord.Color.blue(),
         "fields": [
-            ("🧹 /clear", "`nombre` + `[membre]` + `[bots_only]` + `[contenant]` — Nettoyage intelligent avec filtres.", False),
-            ("🛡️ /scan_salon", "Audit IA de sécurité des 50 derniers messages (toxicité, arnaques, tensions).", False),
-            ("🔒 /lock & /unlock", "`[raison]` — Ferme ou rouvre le salon en urgence en cas de raid/conflit.", False),
-            ("⏱️ /slowmode", "`secondes` — Active ou désactive le mode ralenti en 1 seconde.", False),
-            ("📢 /annonce", "`titre` + `message` + `[mention]` + `[couleur]` — Annonce officielle avec bel embed.", False),
-            ("🗣️ /say", "`texte` + `[salon]` — Fait parler Batman dans n'importe quel salon.", False),
-            ("🔇 /timeout & /untimeout", "`membre` + `minutes` + `[raison]` — Mute temporaire (1min à 28 jours).", False),
-            ("👢 /kick & 🔨 /ban", "`membre` + `[raison]` — Sanctions sécurisées avec boutons de confirmation.", False),
-            ("🕵️ /audit_membre", "`membre` — Fiche d'enquête sur un membre (création, rôles, permissions, risques).", False),
-            ("💥 /nuke", "Recrée le salon à neuf pour éradiquer tout le spam (Irréversible).", False),
+            ("🧠 /ia", "`question` + `[fichier]` + `[prive]` — Gemini + **Recherche Google en direct** + lecture Image, Vocal, PDF & Code (furtif par défaut !).", False),
+            ("🕵️ /verifier", "`affirmation` — **Détecteur de mytho & Fact-Check Google en direct** avec preuves et réponse prête à copier !", False),
+            ("🎨 /image & ✨ /imagine", "Génère des images IA Haute Définition (ratios 1:1, 16:9, 9:16 + régénération).", False),
+            ("✍️ /reformuler", "`texte` + `style` — Réécrit ton brouillon (SMS naturel, Pro, Clash, Sans fautes...) en privé.", False),
+            ("⚡ /repartie", "`sujet` + `[intensite]` — Génère 3 punchlines cinglantes en mode furtif.", False),
+            ("🌍 /traduire", "`texte` + `langue` — Traduction instantanée ultra-naturelle.", False),
+        ]
+    },
+    {
+        "title": "🦇 Batman — Page 4/4 : Outils Pratiques & Mini-Jeux",
+        "color": discord.Color.purple(),
+        "fields": [
+            ("📊 /sondage", "`question` + `options` — Crée un sondage interactif avec barres en direct.", False),
+            ("🎮 /morpion", "Joue au Morpion (Tic-Tac-Toe) directement dans la discussion avec un ami !", False),
+            ("⏱️ /chrono", "`duree` + `nom` — Minuteur Pomodoro qui t'alerte dès la fin.", False),
+            ("🌤️ /meteo & 📈 /calcul", "Météo en direct sans clé d'API et calculatrice scientifique.", False),
+            ("🎲 /dice & 🦇 /batman", "Lancer de dés et citations cultes du Chevalier Noir.", False),
         ]
     }
 ]
@@ -510,7 +551,7 @@ class HelpView(discord.ui.View):
         embed = discord.Embed(title=p["title"], color=p["color"])
         for name, val, inline in p["fields"]:
             embed.add_field(name=name, value=val, inline=inline)
-        embed.set_footer(text=f"Page {self.page + 1}/{len(HELP_PAGES)} • Batman tourne H24 sur Render")
+        embed.set_footer(text=f"Page {self.page + 1}/{len(HELP_PAGES)} • Assistant Personnel Batman H24")
         return embed
 
     @discord.ui.button(label="◀ Précédent", style=discord.ButtonStyle.secondary)
@@ -525,36 +566,417 @@ class HelpView(discord.ui.View):
         self._update_buttons()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-@bot.tree.command(name="aide", description="Affiche toutes les fonctionnalités de Batman")
+@bot.tree.command(name="aide", description="Affiche toutes tes fonctionnalités personnelles Batman")
 @everywhere
 async def aide(interaction: discord.Interaction):
     view = HelpView()
-    await interaction.response.send_message(embed=view.build_embed(), view=view)
+    await interaction.response.send_message(embed=view.build_embed(), view=view, ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════
-#  MENUS CONTEXTUELS CLIC-DROIT (Discord Apps)
+#  VUES PARTAGÉES & STUDIO GHOSTWRITER INTERACTIF (100% PERSONNEL)
 # ══════════════════════════════════════════════════════════════
 
-# 1. Clic droit sur un message -> Résumer avec Batman
+class ShareEmbedView(discord.ui.View):
+    """Permet d'afficher publiquement dans la discussion un résultat initialement furtif."""
+    def __init__(self, author_id: int, embed_to_share: discord.Embed):
+        super().__init__(timeout=600)
+        self.author_id = author_id
+        self.embed_to_share = embed_to_share
+
+    @discord.ui.button(label="Afficher dans la discussion", style=discord.ButtonStyle.secondary, emoji="📢")
+    async def share_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        button.disabled = True
+        try:
+            await interaction.response.send_message(embed=self.embed_to_share, ephemeral=False)
+        except Exception:
+            try:
+                await interaction.channel.send(embed=self.embed_to_share)
+                await interaction.response.send_message("✅ Affiché dans la discussion !", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"⚠️ Impossible de publier ici : `{e}`", ephemeral=True)
+
+
+async def generate_ghostwriter_card(
+    user: discord.abc.User,
+    channel,
+    message: discord.Message,
+    custom_instruction: str = ""
+) -> tuple[discord.Embed, str, str, str]:
+    """Analyse le message cible (texte, vocal ou image) + la discussion et génère l'embed et les 3 réponses."""
+    uid = str(user.id)
+    user_style = get_user_style_description(uid)
+    style_label = get_user_style_label(uid)
+
+    content = message.clean_content or message.content or ""
+    media_bytes = None
+    media_mime = "image/png"
+    media_label = None
+
+    if message.attachments:
+        try:
+            b_data, b_mime, f_txt, k_lbl = await extract_attachment_payload(message.attachments[0])
+            if b_data:
+                media_bytes, media_mime, media_label = b_data, b_mime, k_lbl
+            elif f_txt:
+                content = f"{content}\n[Contenu fichier : {f_txt[:2000]}]" if content else f"[Fichier envoyé : {f_txt[:2000]}]"
+                media_label = k_lbl
+        except Exception:
+            pass
+
+    if not content and not media_bytes:
+        raise ValueError("Ce message ne contient ni texte, ni vocal, ni image exploitable.")
+
+    # Récupération automatique du fil de discussion précédant le message
+    convo_lines = []
+    user_samples_in_convo = []
+    if hasattr(channel, "history"):
+        try:
+            async for m in channel.history(limit=8, before=message.created_at):
+                txt = m.clean_content or m.content
+                if txt and not txt.startswith(("/", "!", ".")):
+                    convo_lines.append(f"{m.author.display_name}: {txt}")
+                    if m.author.id == user.id and len(txt) > 3:
+                        user_samples_in_convo.append(txt)
+            convo_lines.reverse()
+        except Exception:
+            pass
+
+    # Apprentissage automatique passif des vraies expressions de l'utilisateur
+    if user_samples_in_convo:
+        try:
+            styles = load_json(STYLES_FILE)
+            u_style = styles.get(uid, {"label": "Apprentissage continu", "rules": DEFAULT_STYLE, "recent_messages": []})
+            recent = u_style.get("recent_messages", [])
+            for s in user_samples_in_convo:
+                if s not in recent:
+                    recent.append(s[:250])
+            u_style["recent_messages"] = recent[-30:]
+            styles[uid] = u_style
+            save_json(STYLES_FILE, styles)
+            user_style = get_user_style_description(uid)
+        except Exception:
+            pass
+
+    target_desc = content if content else f"[{media_label} envoyé par {message.author.display_name}]"
+    convo_lines.append(f"{message.author.display_name}: {target_desc}")
+    convo_context = "\n".join(convo_lines)
+
+    prompt = f"""Tu es le ghostwriter Discord personnel et ultra-réaliste de {user.display_name}.
+Voici le fil de la discussion pour comprendre le sujet, la relation et l'ambiance :
+--- HISTORIQUE DE LA CONVERSATION ---
+{convo_context}
+--- FIN DE L'HISTORIQUE ---
+
+Dernier message reçu de {message.author.display_name} auquel {user.display_name} veut répondre :
+« {target_desc} »
+"""
+    if media_bytes and media_label:
+        prompt += f"\n(Un média de type {media_label} est joint : écoute/regarde son contenu pour y répondre de façon ultra pertinente !)\n"
+
+    prompt += f"""
+Profil de style de {user.display_name} :
+{user_style}
+"""
+    if user_samples_in_convo:
+        prompt += f"\nExemples directs de {user.display_name} dans cette conversation :\n" + "\n".join(f"- « {s} »" for s in user_samples_in_convo[-4:]) + "\n"
+
+    if custom_instruction:
+        prompt += f"\n⚡ CONSIGNE SPÉCIALE PRIORITAIRE DE {user.display_name.upper()} :\n{custom_instruction}\n"
+
+    prompt += """
+RÈGLES D'OR ANTI-ROBOT :
+- Écris comme un VRAI humain sur Discord, JAMAIS comme une IA trop polie ou scolaire !
+- Évite les phrases à rallonge, les points d'exclamation forcés ou le ton "service client".
+- Si le message de l'interlocuteur est dans une langue étrangère (anglais, espagnol, arabe, etc.), écris les 3 options DANS CETTE MÊME LANGUE ÉTRANGÈRE (naturelle/familière), et indique dans ===INFO=== la traduction française du message reçu + le sens des réponses. Sinon laisse ===INFO=== vide (ou résume le vocal en 1 phrase si c'était un vocal).
+
+Génère 3 propositions de réponses prêtes à copier-coller :
+1. Ton style naturel (fluide, crédible à 100%, comme si tu l'avais tapé toi-même)
+2. Piquante / Drôle (avec de l'esprit, du second degré ou une bonne répartie)
+3. Courte / Directe (réponse rapide style vrai message Discord de quelques mots)
+
+RÉPONDS EXACTEMENT AU FORMAT SUIVANT (sans guillemets autour des options) :
+===INFO===
+(vide si texte français simple, sinon résumé 1 ligne du vocal/image ou traduction FR si langue étrangère)
+===OPT1===
+(texte pur de l'option 1 uniquement)
+===OPT2===
+(texte pur de l'option 2 uniquement)
+===OPT3===
+(texte pur de l'option 3 uniquement)"""
+
+    raw = await ask_gemini(prompt, image_bytes=media_bytes, mime_type=media_mime)
+    info_line, opt1, opt2, opt3 = "", "", "", ""
+    if "===OPT1===" in raw and "===OPT2===" in raw and "===OPT3===" in raw:
+        before_opt1, rest1 = raw.split("===OPT1===", 1)
+        if "===INFO===" in before_opt1:
+            info_line = before_opt1.split("===INFO===", 1)[1].strip()
+        opt1_part, rest2 = rest1.split("===OPT2===", 1)
+        opt2_part, opt3_part = rest2.split("===OPT3===", 1)
+        opt1 = opt1_part.strip().strip("«»\"")
+        opt2 = opt2_part.strip().strip("«»\"")
+        opt3 = opt3_part.strip().strip("«»\"")
+    else:
+        opt1 = raw[:300].strip()
+        opt2 = "carrément mdrr et toi ?"
+        opt3 = "grave trkl"
+
+    desc = ""
+    if len(convo_lines) > 1:
+        desc += f"📖 *Fil lu automatiquement ({len(convo_lines)} messages)*"
+    if media_label:
+        desc += f" • {media_label} analysé"
+    if desc:
+        desc += "\n"
+
+    preview = content[:130] + ("..." if len(content) > 130 else "") if content else f"[{media_label}]"
+    desc += f"En réponse à **{message.author.display_name}** : *« {preview} »*\n"
+    if info_line and info_line.lower() not in ("vide", "aucun", "none", "()"):
+        desc += f"💡 *{info_line}*\n"
+    if custom_instruction:
+        desc += f"🎛️ *Mode actif : {custom_instruction[:90]}*\n"
+
+    desc += (
+        f"\n**🎯 Option 1 ({style_label}) :**\n```\n{opt1}\n```\n"
+        f"**⚡ Option 2 (Drôle / Piquante) :**\n```\n{opt2}\n```\n"
+        f"**💬 Option 3 (Courte / Directe) :**\n```\n{opt3}\n```"
+    )
+
+    embed = discord.Embed(
+        title="💬 Studio Réponse Rapide (100% Furtif)",
+        description=desc[:4000],
+        color=discord.Color.teal()
+    )
+    embed.set_footer(text="Clique sur « Copier » pour coller depuis TON vrai compte • Ou ajuste le style ci-dessous !")
+    return embed, opt1, opt2, opt3
+
+
+class GhostwriterIntentModal(discord.ui.Modal, title="✍️ Lui dire quoi répondre"):
+    intent_input = discord.ui.TextInput(
+        label="Que veux-tu lui dire en gros ?",
+        placeholder="Ex: dis non j'ai la flemme, propose 21h, rembarre-le gentiment...",
+        style=discord.TextStyle.short,
+        required=True,
+        max_length=200
+    )
+
+    def __init__(self, target_message: discord.Message, author_id: int):
+        super().__init__()
+        self.target_message = target_message
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            instruction = f"Exprime cette idée précise : « {self.intent_input.value} »"
+            embed, opt1, opt2, opt3 = await generate_ghostwriter_card(
+                interaction.user, interaction.channel, self.target_message, custom_instruction=instruction
+            )
+            view = GhostwriterView(self.target_message, self.author_id, opt1, opt2, opt3)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
+
+
+class GhostwriterView(discord.ui.View):
+    def __init__(self, target_message: discord.Message, author_id: int, opt1: str, opt2: str, opt3: str):
+        super().__init__(timeout=900)
+        self.target_message = target_message
+        self.author_id = author_id
+        self.opt1 = opt1
+        self.opt2 = opt2
+        self.opt3 = opt3
+
+    async def _copy_raw(self, interaction: discord.Interaction, text: str):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        # Envoie UNIQUEMENT le texte brut en éphémère : sur mobile appui long -> Copier le texte = 0 caractère parasite !
+        await interaction.response.send_message(text, ephemeral=True)
+
+    async def _rewrite_in_place(self, interaction: discord.Interaction, instruction: str):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        await interaction.response.defer()
+        try:
+            embed, o1, o2, o3 = await generate_ghostwriter_card(
+                interaction.user, interaction.channel, self.target_message, custom_instruction=instruction
+            )
+            self.opt1, self.opt2, self.opt3 = o1, o2, o3
+            await interaction.edit_original_response(embed=embed, view=self)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
+
+    # Rangée 0 : Copie pure 1-clic (pour coller depuis TON vrai compte humain sans afficher Batman !)
+    @discord.ui.button(label="Copier 1", style=discord.ButtonStyle.success, emoji="📋", row=0)
+    async def btn_copy1(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._copy_raw(interaction, self.opt1)
+
+    @discord.ui.button(label="Copier 2", style=discord.ButtonStyle.primary, emoji="📋", row=0)
+    async def btn_copy2(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._copy_raw(interaction, self.opt2)
+
+    @discord.ui.button(label="Copier 3", style=discord.ButtonStyle.secondary, emoji="📋", row=0)
+    async def btn_copy3(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._copy_raw(interaction, self.opt3)
+
+    # Rangée 1 : Studio d'ajustement en direct + envoi via bot optionnel
+    @discord.ui.button(label="Guider", style=discord.ButtonStyle.primary, emoji="✍️", row=1)
+    async def btn_guide(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        await interaction.response.send_modal(GhostwriterIntentModal(self.target_message, self.author_id))
+
+    @discord.ui.button(label="Mode SMS", style=discord.ButtonStyle.secondary, emoji="📱", row=1)
+    async def btn_sms(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._rewrite_in_place(
+            interaction,
+            "Style SMS Discord ultra-naturel : tout en minuscules, abréviations courantes crédibles (trkl, tkt, jsp, mdr si pertinent), zéro ponctuation robotique, court et spontané."
+        )
+
+    @discord.ui.button(label="Piquant", style=discord.ButtonStyle.secondary, emoji="🔥", row=1)
+    async def btn_spicy(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._rewrite_in_place(
+            interaction,
+            "Style taquin, piquant, plein de répartie et de second degré pour avoir le dernier mot avec classe."
+        )
+
+    @discord.ui.button(label="Autres", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
+    async def btn_regen(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._rewrite_in_place(
+            interaction,
+            "Propose 3 nouvelles idées complètement différentes des précédentes."
+        )
+
+    @discord.ui.button(label="Poster (Bot)", style=discord.ButtonStyle.secondary, emoji="🤖", row=1)
+    async def btn_post_bot(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        content = f"> 💬 *En réponse à {self.target_message.author.display_name} :*\n{self.opt1}"
+        # 1. Webhook si le bot est sur un serveur avec permission Webhook
+        if interaction.guild and hasattr(interaction.channel, "webhooks"):
+            try:
+                webhooks = await interaction.channel.webhooks()
+                wh = next((w for w in webhooks if w.name == "BatmanGhostwriter" and w.token), None)
+                if not wh:
+                    wh = await interaction.channel.create_webhook(name="BatmanGhostwriter")
+                await wh.send(content=content, username=interaction.user.display_name, avatar_url=interaction.user.display_avatar.url)
+                return await interaction.response.send_message("✅ Posté avec ton pseudo et ton avatar !", ephemeral=True)
+            except Exception:
+                pass
+        # 2. Réponse publique User App (affiche Batman [APP])
+        try:
+            await interaction.response.send_message(content=content, ephemeral=False)
+        except Exception:
+            try:
+                await interaction.channel.send(content=content)
+                await interaction.response.send_message("✅ Posté dans le salon !", ephemeral=True)
+            except Exception:
+                await interaction.response.send_message(self.opt1, ephemeral=True)
+
+
+class BridgeToGhostwriterView(discord.ui.View):
+    """Bouton passerelle permettant de générer 3 réponses directement après un résumé vocal ou une analyse de ton."""
+    def __init__(self, target_message: discord.Message, author_id: int, context_hint: str = ""):
+        super().__init__(timeout=600)
+        self.target_message = target_message
+        self.author_id = author_id
+        self.context_hint = context_hint
+
+    @discord.ui.button(label="Préparer 3 réponses adaptées", style=discord.ButtonStyle.success, emoji="💬")
+    async def make_replies(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            hint = f"Tiens compte de ce contexte : {self.context_hint[:250]}" if self.context_hint else ""
+            embed, o1, o2, o3 = await generate_ghostwriter_card(
+                interaction.user, interaction.channel, self.target_message, custom_instruction=hint
+            )
+            view = GhostwriterView(self.target_message, self.author_id, o1, o2, o3)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  MENUS CONTEXTUELS CLIC-DROIT (Discord Apps — 100% Personnels)
+# ══════════════════════════════════════════════════════════════
+
+# 1. Clic droit sur un message -> Résumer avec Batman (Texte, Message Vocal, PDF, Fichier ou Discussion !)
 @bot.tree.context_menu(name="🧠 Résumer avec Batman")
 @everywhere
 async def context_summarize(interaction: discord.Interaction, message: discord.Message):
-    content = message.clean_content or message.content
-    if not content:
-        return await interaction.response.send_message("❌ Ce message ne contient pas de texte à résumer.", ephemeral=True)
-    
     await interaction.response.defer(ephemeral=True, thinking=True)
-    prompt = f"Fais un résumé clair et percutant en 2 ou 3 points clés du texte suivant :\n\n{content}"
+    content = message.clean_content or message.content or ""
+    media_bytes, media_mime, file_text, kind_label = None, "image/png", None, None
+
+    if message.attachments:
+        try:
+            media_bytes, media_mime, file_text, kind_label = await extract_attachment_payload(message.attachments[0])
+        except Exception:
+            pass
+
     try:
-        summary = await ask_gemini(prompt)
-        embed = discord.Embed(
-            title="🧠 Résumé par Batman",
-            description=summary[:1900],
-            color=discord.Color.teal()
-        )
-        embed.set_footer(text=f"Auteur du message original : {message.author.display_name}")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        # Cas A : Message Vocal / Audio Discord !
+        if media_bytes and kind_label and "Audio" in kind_label:
+            prompt = (
+                f"Écoute attentivement ce message vocal envoyé par {message.author.display_name}.\n"
+                "Donne en français :\n"
+                "1. 🗣️ **Transcription fidèle** (ce que la personne dit exactement)\n"
+                "2. ⚡ **L'essentiel en 2 points** (ce qu'il faut retenir ou la question posée)"
+            )
+            summary = await ask_gemini(prompt, image_bytes=media_bytes, mime_type=media_mime)
+            title = f"🎙️ Vocal de {message.author.display_name} (Écouté en furtif)"
+
+        # Cas B : PDF ou Fichier texte/code
+        elif (media_bytes and kind_label and "PDF" in kind_label) or file_text:
+            body = f"\n\nContenu :\n{file_text}" if file_text else ""
+            prompt = f"Résume clairement ce document ({kind_label}) en points clés faciles à lire, et signale les infos importantes :{body}"
+            summary = await ask_gemini(prompt, image_bytes=media_bytes, mime_type=media_mime or "application/pdf")
+            title = f"📄 Résumé du fichier ({message.author.display_name})"
+
+        # Cas C : Texte court -> Rattrapage des derniers messages de la discussion si l'historique est accessible !
+        elif content and len(content) < 160 and hasattr(interaction.channel, "history"):
+            convo = []
+            try:
+                async for m in interaction.channel.history(limit=25):
+                    t = m.clean_content or m.content
+                    if t and not t.startswith(("/", "!", ".")):
+                        convo.append(f"{m.author.display_name}: {t}")
+                convo.reverse()
+            except Exception:
+                pass
+
+            if len(convo) >= 4:
+                joined = "\n".join(convo)
+                prompt = (
+                    f"Voici les {len(convo)} derniers messages d'une discussion Discord :\n{joined}\n\n"
+                    "Fais un récapitulatif ultra-clair (« Ce que tu as raté ») en 3-4 puces : de quoi ils parlent, qui pense quoi, et quelle est la dernière question/info."
+                )
+                summary = await ask_gemini(prompt)
+                title = f"📖 Récap de la discussion ({len(convo)} derniers messages)"
+            else:
+                prompt = f"Explique et résume clairement ce message (et traduis-le s'il n'est pas en français) :\n\n{content}"
+                summary = await ask_gemini(prompt)
+                title = "🧠 Résumé & Explication par Batman"
+
+        # Cas D : Long pavé de texte
+        elif content:
+            prompt = (
+                "Fais un résumé ultra-clair et percutant en 2 à 4 points clés de ce message "
+                "(s'il est en langue étrangère, résume-le directement en français) :\n\n" + content
+            )
+            summary = await ask_gemini(prompt)
+            title = f"🧠 Résumé du pavé de {message.author.display_name}"
+        else:
+            return await interaction.followup.send("❌ Ce message ne contient ni texte, ni message vocal, ni document à résumer.", ephemeral=True)
+
+        embed = discord.Embed(title=title, description=summary[:3800], color=discord.Color.teal())
+        embed.set_footer(text="100% Furtif (visible uniquement par toi)")
+        view = BridgeToGhostwriterView(message, interaction.user.id, context_hint=summary[:250])
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
 
@@ -564,14 +986,16 @@ async def context_summarize(interaction: discord.Interaction, message: discord.M
 @everywhere
 async def context_save_note(interaction: discord.Interaction, message: discord.Message):
     content = message.clean_content or message.content
+    if not content and message.attachments:
+        content = "\n".join(a.url for a in message.attachments)
     if not content:
-        return await interaction.response.send_message("❌ Ce message ne contient aucun texte à sauvegarder.", ephemeral=True)
-    
+        return await interaction.response.send_message("❌ Ce message ne contient aucun contenu à sauvegarder.", ephemeral=True)
+
     uid = str(interaction.user.id)
     notes = load_json(NOTES_FILE)
     lst = notes.get(uid, [])
-    
-    title = f"Note de {message.author.display_name} ({datetime.now().strftime('%d/%m')})"
+
+    title = f"Message de {message.author.display_name} ({datetime.now().strftime('%d/%m')})"
     lst.append({
         "title": title,
         "content": content[:1000],
@@ -582,7 +1006,7 @@ async def context_save_note(interaction: discord.Interaction, message: discord.M
 
     embed = discord.Embed(
         title="📝 Message sauvegardé dans tes notes !",
-        description=f"**{title}**\n> {content[:200]}...",
+        description=f"**{title}**\n> {content[:200]}",
         color=discord.Color.purple()
     )
     embed.set_footer(text="Retrouve toutes tes notes avec /note")
@@ -598,11 +1022,11 @@ async def context_user_info(interaction: discord.Interaction, user: discord.User
 
     embed = discord.Embed(
         title=f"🦇 Profil de {user.name}",
-        description=f"**Pseudo :** `{user.display_name}`\n**ID :** `{user.id}`",
+        description=f"**Pseudo affiché :** `{user.display_name}`\n**Nom d'utilisateur :** `{user.name}`\n**ID :** `{user.id}`",
         color=discord.Color.dark_theme()
     )
     embed.add_field(name="📅 Compte créé le", value=f"<t:{created_ts}:D> (<t:{created_ts}:R>)")
-    embed.add_field(name="🤖 Est un bot ?", value="Oui" if user.bot else "Non")
+    embed.add_field(name="🤖 Bot ?", value="Oui" if user.bot else "Non")
     embed.set_image(url=avatar_url)
 
     view = discord.ui.View()
@@ -610,7 +1034,7 @@ async def context_user_info(interaction: discord.Interaction, user: discord.User
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-# 4. Clic droit sur un message -> Analyser l'image avec l'IA
+# 4. Clic droit sur un message -> Analyser l'image avec l'IA (100% Furtif + OCR + Résolution d'exos)
 @bot.tree.context_menu(name="🔍 Analyser l'image (IA)")
 @everywhere
 async def context_analyze_image(interaction: discord.Interaction, message: discord.Message):
@@ -618,21 +1042,14 @@ async def context_analyze_image(interaction: discord.Interaction, message: disco
     mime_type = "image/png"
     img_bytes = None
 
-    # Pièces jointes du message
     for att in message.attachments:
         ct = att.content_type or ""
-        if ct.startswith("image/"):
+        if ct.startswith("image/") or any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]):
             img_bytes = await att.read()
-            mime_type = ct
-            image_url = att.url
-            break
-        elif any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]):
-            img_bytes = await att.read()
-            mime_type = "image/jpeg" if att.filename.lower().endswith((".jpg", ".jpeg")) else "image/png"
+            mime_type = ct if ct.startswith("image/") else ("image/jpeg" if att.filename.lower().endswith((".jpg", ".jpeg")) else "image/png")
             image_url = att.url
             break
 
-    # Embeds d'image
     if not img_bytes and message.embeds:
         for emb in message.embeds:
             if emb.image and emb.image.url:
@@ -649,231 +1066,66 @@ async def context_analyze_image(interaction: discord.Interaction, message: disco
                         mime_type = resp.headers.get("Content-Type", "image/png")
 
     if not img_bytes:
-        return await interaction.response.send_message("❌ Aucune image trouvée dans ce message à faire analyser.", ephemeral=True)
+        return await interaction.response.send_message("❌ Aucune image trouvée dans ce message.", ephemeral=True)
 
-    await interaction.response.defer(thinking=True)
-    prompt = "Décris et analyse cette image avec précision et clarté en français. Explique ce qu'elle montre, ses détails notables et son contexte."
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    prompt = (
+        "Analyse cette image en français avec perspicacité :\n"
+        "- S'il s'agit d'un **exercice, devoir, QCM ou code/erreur**, donne directement la **solution claire et expliquée** !\n"
+        "- S'il s'agit d'une **capture d'écran ou texte en langue étrangère**, traduis et explique l'essentiel.\n"
+        "- S'il s'agit d'un **mème, photo, objet ou lieu**, identifie-le précisément et explique le contexte ou la référence."
+    )
     try:
         analysis = await ask_gemini(prompt, image_bytes=img_bytes, mime_type=mime_type)
-        if len(analysis) > 1900:
-            analysis = analysis[:1900] + "… *(suite tronquée)*"
         embed = discord.Embed(
-            title="🔍 Analyse d'image par l'IA",
-            description=analysis,
+            title="🔍 Analyse d'image IA (Furtive)",
+            description=analysis[:3800],
             color=discord.Color.teal()
         )
         if image_url:
             embed.set_thumbnail(url=image_url)
-        embed.set_footer(text=f"Image de {message.author.display_name} • Propulsé par Gemini Vision")
-        await interaction.followup.send(embed=embed)
+        embed.set_footer(text=f"Visible uniquement par toi • Image de {message.author.display_name}")
+        view = ShareEmbedView(interaction.user.id, embed)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
 
 
-# 5. Clic droit sur un message -> Répondre à ma place (Ghostwriter)
-class GhostwriterView(discord.ui.View):
-    def __init__(self, target_message: discord.Message, author_id: int, opt1: str, opt2: str, opt3: str):
-        super().__init__(timeout=600)
-        self.target_message = target_message
-        self.author_id = author_id
-        self.opt1 = opt1
-        self.opt2 = opt2
-        self.opt3 = opt3
-
-    async def _send_reply(self, interaction: discord.Interaction, text: str, opt_num: int):
-        if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
-
-        content = f"> 💬 *En réponse à {self.target_message.author.display_name} :*\n{text}"
-        sent = False
-
-        # Tentative 1 : Via Webhook pour poster avec le vrai nom et l'avatar de l'utilisateur (Clone d'identité !)
-        if interaction.guild and hasattr(interaction.channel, "webhooks"):
-            try:
-                webhooks = await interaction.channel.webhooks()
-                wh = next((w for w in webhooks if w.name == "BatmanGhostwriter" and w.token), None)
-                if not wh:
-                    wh = await interaction.channel.create_webhook(name="BatmanGhostwriter")
-
-                avatar_url = interaction.user.display_avatar.url
-                username = interaction.user.display_name
-                await wh.send(
-                    content=content,
-                    username=username,
-                    avatar_url=avatar_url
-                )
-                sent = True
-                await interaction.response.send_message(
-                    f"✅ Message envoyé sous ton nom et ton avatar (**{username}**) !",
-                    ephemeral=True
-                )
-            except Exception:
-                pass
-
-        # Tentative 2 : Via channel.send classique si le webhook échoue
-        if not sent:
-            try:
-                await interaction.channel.send(content=content)
-                sent = True
-                await interaction.response.send_message(f"✅ Option {opt_num} envoyée dans le salon !", ephemeral=True)
-            except (discord.Forbidden, discord.HTTPException):
-                # 403 Forbidden ou 50001 Missing Access (bot en User App non membre du salon)
-                err_embed = discord.Embed(
-                    title="📋 Réponse prête à envoyer",
-                    description=(
-                        "Comme Batman est installé sur ton compte (User App) et n'est pas membre de ce serveur, "
-                        "Discord ne l'autorise pas à envoyer le message à ta place.\n\n"
-                        "✨ **Copie simplement le message ci-dessous et colle-le dans le chat :**\n"
-                        f"```\n{text}\n```"
-                    ),
-                    color=discord.Color.blue()
-                )
-                err_embed.set_footer(text="💡 Astuce : Sur PC ou mobile, clique sur l'icône copier en haut à droite du cadre !")
-                if interaction.response.is_done():
-                    await interaction.followup.send(embed=err_embed, ephemeral=True)
-                else:
-                    await interaction.response.send_message(embed=err_embed, ephemeral=True)
-            except Exception as e:
-                err_msg = f"⚠️ Impossible d'envoyer le message : `{e}`"
-                if interaction.response.is_done():
-                    await interaction.followup.send(err_msg, ephemeral=True)
-                else:
-                    await interaction.response.send_message(err_msg, ephemeral=True)
-
-    @discord.ui.button(label="Envoyer Option 1", style=discord.ButtonStyle.success, emoji="🎯")
-    async def btn_opt1(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._send_reply(interaction, self.opt1, 1)
-
-    @discord.ui.button(label="Envoyer Option 2", style=discord.ButtonStyle.primary, emoji="⚡")
-    async def btn_opt2(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._send_reply(interaction, self.opt2, 2)
-
-    @discord.ui.button(label="Envoyer Option 3", style=discord.ButtonStyle.secondary, emoji="🤝")
-    async def btn_opt3(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._send_reply(interaction, self.opt3, 3)
-
-
+# 5. Clic droit sur un message -> Répondre à ma place (Ghostwriter V2)
 @bot.tree.context_menu(name="💬 Répondre à ma place")
 @everywhere
 async def context_reply_for_me(interaction: discord.Interaction, message: discord.Message):
-    content = message.clean_content or message.content
-    if not content:
-        return await interaction.response.send_message("❌ Ce message ne contient pas de texte.", ephemeral=True)
+    if not (message.clean_content or message.content) and not message.attachments:
+        return await interaction.response.send_message("❌ Ce message est vide.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True, thinking=True)
-    uid = str(interaction.user.id)
-    user_style = get_user_style_description(uid)
-    style_label = get_user_style_label(uid)
-
-    # Récupération automatique du fil de discussion précédant le message
-    convo_lines = []
-    user_samples_in_convo = []
-    if hasattr(interaction.channel, "history"):
-        try:
-            async for m in interaction.channel.history(limit=8, before=message.created_at):
-                txt = m.clean_content or m.content
-                if txt and not txt.startswith(("/", "!", ".")):
-                    convo_lines.append(f"{m.author.display_name}: {txt}")
-                    if m.author.id == interaction.user.id and len(txt) > 3:
-                        user_samples_in_convo.append(txt)
-            convo_lines.reverse()
-        except Exception:
-            pass
-
-    # Apprentissage automatique passif : mémoriser les expressions de l'utilisateur détectées
-    if user_samples_in_convo:
-        try:
-            styles = load_json(STYLES_FILE)
-            u_style = styles.get(uid, {"label": "Apprentissage continu", "rules": DEFAULT_STYLE, "recent_messages": []})
-            recent = u_style.get("recent_messages", [])
-            for s in user_samples_in_convo:
-                if s not in recent:
-                    recent.append(s[:250])
-            u_style["recent_messages"] = recent[-30:]
-            styles[uid] = u_style
-            save_json(STYLES_FILE, styles)
-        except Exception:
-            pass
-
-    convo_lines.append(f"{message.author.display_name}: {content}")
-    convo_context = "\n".join(convo_lines)
-
-    prompt = f"""Tu es un ghostwriter Discord d'élite pour {interaction.user.display_name}.
-Voici le fil de la discussion dans le salon pour bien comprendre le sujet et l'ambiance :
---- HISTORIQUE DE LA CONVERSATION ---
-{convo_context}
---- FIN DE L'HISTORIQUE ---
-
-Le dernier message auquel {interaction.user.display_name} doit répondre est celui de {message.author.display_name} :
-« {content} »
-
-Voici le style habituel de {interaction.user.display_name} :
-{user_style}
-"""
-    if user_samples_in_convo:
-        prompt += f"\nDans cette discussion même, {interaction.user.display_name} a déjà écrit ceci :\n" + "\n".join(f"- « {s} »" for s in user_samples_in_convo[-4:])
-
-    prompt += """
-Génère 3 propositions de réponses prêtes à l'envoi, parfaitement cohérentes avec toute la discussion :
-1. Dans son style personnel (imitation très fidèle de sa façon d'écrire, son argot, sa ponctuation et son humeur)
-2. Piquante & Drôle (avec de l'esprit, du second degré ou une répartie)
-3. Diplomate & Efficace (courte, bienveillante et claire)
-
-RÉPONDS EXACTEMENT AU FORMAT :
-===OPT1===
-(texte de l'option 1 uniquement)
-===OPT2===
-(texte de l'option 2 uniquement)
-===OPT3===
-(texte de l'option 3 uniquement)"""
-
     try:
-        raw = await ask_gemini(prompt)
-        opt1, opt2, opt3 = "", "", ""
-        if "===OPT1===" in raw and "===OPT2===" in raw and "===OPT3===" in raw:
-            parts = raw.split("===OPT1===")[1].split("===OPT2===")
-            opt1 = parts[0].strip()
-            parts2 = parts[1].split("===OPT3===")
-            opt2 = parts2[0].strip()
-            opt3 = parts2[1].strip()
-        else:
-            opt1 = raw[:300].strip()
-            opt2 = "Pas mal, mais je préfère passer mon tour !"
-            opt3 = "Message bien reçu, je reviens vers toi rapidement !"
-
-        desc = ""
-        if len(convo_lines) > 1:
-            desc += f"📖 *Discussion analysée ({len(convo_lines)} messages)*\n"
-        desc += (
-            f"En réponse à **{message.author.display_name}** :\n> *« {content[:140]}... »*\n\n"
-            f"**🎯 Option 1 (Ton style : {style_label}) :**\n```\n{opt1}\n```\n"
-            f"**⚡ Option 2 (Piquante / Drôle) :**\n```\n{opt2}\n```\n"
-            f"**🤝 Option 3 (Diplomate / Bref) :**\n```\n{opt3}\n```"
-        )
-
-        embed = discord.Embed(
-            title="💬 Propositions de réponses prêtes à l'emploi",
-            description=desc,
-            color=discord.Color.teal()
-        )
-        embed.set_footer(text="Discret (visible uniquement par toi) • Copie l'option de ton choix !")
+        embed, opt1, opt2, opt3 = await generate_ghostwriter_card(interaction.user, interaction.channel, message)
         view = GhostwriterView(message, interaction.user.id, opt1, opt2, opt3)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
 
 
-# 6. Clic droit sur un message -> Analyser le ton & les sous-entendus
+# 6. Clic droit sur un message -> Analyser le ton & les sous-entendus (Texte & Vocaux !)
 @bot.tree.context_menu(name="🎭 Analyser ton & sous-entendus")
 @everywhere
 async def context_analyze_tone(interaction: discord.Interaction, message: discord.Message):
-    content = message.clean_content or message.content
-    if not content:
-        return await interaction.response.send_message("❌ Ce message ne contient pas de texte.", ephemeral=True)
+    content = message.clean_content or message.content or ""
+    media_bytes, media_mime, _, kind_label = None, "audio/ogg", None, None
+    if message.attachments:
+        try:
+            b_data, b_mime, _, k_lbl = await extract_attachment_payload(message.attachments[0])
+            if b_data and k_lbl and ("Audio" in k_lbl or "Image" in k_lbl):
+                media_bytes, media_mime, kind_label = b_data, b_mime, k_lbl
+        except Exception:
+            pass
+
+    if not content and not media_bytes:
+        return await interaction.response.send_message("❌ Ce message ne contient ni texte ni vocal à analyser.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True, thinking=True)
 
-    # Récupérer le contexte récent pour mieux comprendre le ton
     convo_lines = []
     if hasattr(interaction.channel, "history"):
         try:
@@ -884,31 +1136,38 @@ async def context_analyze_tone(interaction: discord.Interaction, message: discor
             convo_lines.reverse()
         except Exception:
             pass
-    convo_lines.append(f"{message.author.display_name}: {content}")
+    target_disp = content if content else f"[{kind_label}]"
+    convo_lines.append(f"{message.author.display_name}: {target_disp}")
     convo_context = "\n".join(convo_lines)
 
-    prompt = f"""Fais une analyse psychologique fine de ce message Discord envoyé par {message.author.display_name} :
-« {content} »
+    prompt = f"""Fais une analyse psychologique et sociale ultra-fine de ce message Discord envoyé par {message.author.display_name} :
+« {target_disp} »
+"""
+    if media_bytes:
+        prompt += f"(Analyse aussi l'intonation de la voix ou l'image jointe : {kind_label})\n"
 
-Voici le contexte récent de la discussion pour t'aider à évaluer le ton réel :
+    prompt += f"""
+Contexte récent de la discussion :
 {convo_context}
 
-Donne :
-1. 🎭 **Ton émotionnel dominant** (ex: Passif-agressif, Ironique, Taquin, Flirteur, Sérieux, Énervé, etc.)
-2. 🔍 **Sous-entendus & Non-dits** (ce que la personne pense probablement sans le dire ouvertement compte tenu de la discussion)
-3. 💡 **Conseil stratégique** (comment réagir intelligemment sans créer de drama ou pour reprendre l'avantage)
+Donne de manière directe et perspicace :
+1. 🎭 **Vrai ton & Émotion** (ex: Taquin, Froid/distant, Intéressé/Flirt, Passif-agressif, Sincère, Gêné...)
+2. 🕵️ **Sous-entendus & Indice de sincérité** (ce que la personne pense vraiment derrière ses mots, ou si ça sent l'excuse/mytho)
+3. 💡 **Meilleur move** (comment réagir pour garder l'avantage ou gérer la situation intelligemment)
 
-Reste concis, clair et direct."""
+Reste concis et percutant."""
 
     try:
-        analysis = await ask_gemini(prompt)
+        analysis = await ask_gemini(prompt, image_bytes=media_bytes, mime_type=media_mime)
+        header_quote = f"> *« {content[:180]} »*\n\n" if content else f"> *{kind_label} analysé*\n\n"
         embed = discord.Embed(
-            title=f"🎭 Analyse de ton : {message.author.display_name}",
-            description=f"> *« {content[:200]} »*\n\n{analysis[:1800]}",
+            title=f"🎭 Décodeur Psychologique : {message.author.display_name}",
+            description=f"{header_quote}{analysis[:3500]}",
             color=discord.Color.purple()
         )
-        embed.set_footer(text=f"Analyse contextuelle ({len(convo_lines)} messages pris en compte) par Batman IA")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.set_footer(text=f"100% Furtif • Contexte de {len(convo_lines)} message(s)")
+        view = BridgeToGhostwriterView(message, interaction.user.id, context_hint=analysis[:300])
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
 
@@ -1601,93 +1860,149 @@ async def note_ajouter(interaction: discord.Interaction, titre: str, contenu: st
 
 
 # ══════════════════════════════════════════════════════════════
-#  /ia  —  Assistant IA Gemini (Texte & Vision Multimodale)
+#  ASSISTANT IA GEMINI (MÉMOIRE, RECHERCHE GOOGLE, VOCAUX, PDF, IMAGES)
 # ══════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════
-#  ASSISTANT IA GEMINI (MÉMOIRE CONVERSATIONNELLE & VISION)
-# ══════════════════════════════════════════════════════════════
-@bot.tree.command(name="ia", description="Pose une question à l'IA (avec mémoire continue et vision multimodale)")
+class RawCopyView(discord.ui.View):
+    """Bouton 1-clic pour isoler le texte brut à copier facilement sur PC ou mobile."""
+    def __init__(self, author_id: int, raw_text: str):
+        super().__init__(timeout=600)
+        self.author_id = author_id
+        self.raw_text = raw_text[:1990]
+
+    @discord.ui.button(label="Copier le texte pur", style=discord.ButtonStyle.success, emoji="📋")
+    async def copy_btn(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        await interaction.response.send_message(self.raw_text, ephemeral=True)
+
+
+@bot.tree.command(name="ia", description="Pose n'importe quelle question à Batman (Google en direct, photo, devoir, vocal, PDF)")
 @everywhere
 @app_commands.describe(
-    question="Ta question, consigne ou texte à analyser",
-    image="Image optionnelle à envoyer pour analyse (PNG, JPG, WEBP, GIF)"
+    question="Ta question, devoir, recherche d'actu ou consigne",
+    fichier="Image, message vocal/audio, PDF ou fichier texte/code à analyser (optionnel)",
+    prive="Mode furtif : visible uniquement par toi (Activé par défaut !)"
 )
 async def ia_command(
     interaction: discord.Interaction,
     question: str,
-    image: discord.Attachment = None
+    fichier: discord.Attachment = None,
+    prive: bool = True
 ):
-    await interaction.response.defer(thinking=True)
+    await interaction.response.defer(ephemeral=prive, thinking=True)
     try:
         uid = str(interaction.user.id)
-        img_bytes = None
-        mime_type = "image/png"
-        if image is not None:
-            ct = image.content_type or ""
-            is_image = ct.startswith("image/") or any(
-                image.filename.lower().endswith(ext)
-                for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]
-            )
-            if not is_image:
-                return await interaction.followup.send("❌ Le fichier fourni doit être une image valide (PNG, JPG, WEBP, GIF).")
-            img_bytes = await image.read()
-            mime_type = ct if ct.startswith("image/") else "image/png"
+        media_bytes, mime_type, file_text, kind_label = None, "image/png", None, None
 
-        # Récupération de l'historique conversationnel (mémoire)
+        if fichier is not None:
+            media_bytes, mime_type, file_text, kind_label = await extract_attachment_payload(fichier)
+            if not media_bytes and not file_text:
+                return await interaction.followup.send(
+                    "❌ Format non pris en charge. Envoie une **image**, un **audio/vocal**, un **PDF** ou un **fichier texte/code** !",
+                    ephemeral=prive
+                )
+
+        full_prompt = question
+        if file_text:
+            full_prompt = f"{question}\n\n--- CONTENU DU FICHIER ({fichier.filename}) ---\n{file_text}"
+
         history = get_user_memory(uid)
         system_prompt = (
-            "Tu es Batman, l'assistant ultime de Gotham City. Tu es ultra-intelligent, perspicace, "
-            "bienveillant mais doté d'une prestance légendaire. Tu retiens le fil de la discussion "
-            "et les informations confiées par l'utilisateur pour lui répondre avec précision en français."
+            f"Tu es Batman, l'assistant personnel ultra-intelligent de {interaction.user.display_name}. "
+            "Tu es direct, perspicace, précis et fiable. Si on te demande une info récente, utilise la recherche Google. "
+            "Si on t'envoie un exercice ou du code, résous-le clairement étape par étape en français."
         )
 
         answer = await ask_gemini(
-            prompt=question,
-            image_bytes=img_bytes,
-            mime_type=mime_type,
+            prompt=full_prompt,
+            image_bytes=media_bytes,
+            mime_type=mime_type or "image/png",
             history=history,
-            system_instruction=system_prompt
+            system_instruction=system_prompt,
+            use_search=(media_bytes is None)
         )
 
-        # Enregistrement dans la mémoire continue de l'utilisateur
         append_user_memory(uid, question, answer)
 
-        if len(answer) > 1900:
-            answer = answer[:1900] + "… *(suite tronquée)*"
-
-        embed = discord.Embed(title="🧠 Batman IA", description=answer, color=discord.Color.teal())
-        if image is not None:
-            embed.set_thumbnail(url=image.url)
+        embed = discord.Embed(title="🧠 Batman IA", description=answer[:3900], color=discord.Color.teal())
+        if fichier is not None and kind_label and "Image" in kind_label:
+            embed.set_thumbnail(url=fichier.url)
 
         turns = len(get_user_memory(uid)) // 2
-        footer = f"Q: {question[:65]} • Mémoire: {turns} échange(s)"
-        if image is not None:
-            footer += " • 📸 Avec analyse d'image"
+        footer = f"Mémoire: {turns} échange(s)"
+        if kind_label:
+            footer += f" • {kind_label}"
+        else:
+            footer += " • 🌐 Web Google actif"
+        if prive:
+            footer += " • 🥷 Furtif"
         embed.set_footer(text=footer)
-        await interaction.followup.send(embed=embed)
+
+        view = ShareEmbedView(interaction.user.id, embed) if prive else None
+        if view:
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed)
     except Exception as e:
-        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=prive)
 
 
-# ══════════════════════════════════════════════════════════════
-#  OUTILS DE CONVERSATION : REFORMULATION & RÉPARTIES
-# ══════════════════════════════════════════════════════════════
-REFORMULER_STYLES = [
-    app_commands.Choice(name="💼 Professionnel & Poli", value="Professionnel, courtois, soutenu et sans fautes"),
-    app_commands.Choice(name="⚡ Clash percutant & sans pitié", value="Cinglant, tranchant, répartie affûtée sans insultes"),
-    app_commands.Choice(name="🦇 Batman / Dark Knight", value="Sombre, laconique, percutant et mystérieux"),
-    app_commands.Choice(name="🤝 Diplomate & Apaisant", value="Diplomatique, bienveillant, apaisant et mesuré"),
-    app_commands.Choice(name="😂 Humoristique & Second degré", value="Drôle, auto-dérision, second degré et plein d'esprit"),
-    app_commands.Choice(name="✨ Éloquent & Poétique", value="Vocabulaire riche, poétique, soigné et littéraire"),
-    app_commands.Choice(name="📏 Minimaliste & Direct", value="Ultra court, sans fioriture, direct au but"),
-    app_commands.Choice(name="🔤 Corriger l'orthographe & style", value="Corrige la grammaire, la syntaxe et l'orthographe en restant naturel")
-]
-
-@bot.tree.command(name="reformuler", description="Reformule un texte ou un brouillon dans le style de ton choix")
+@bot.tree.command(name="verifier", description="🕵️ Détecteur de mytho & Fact-Check Google en direct (100% furtif)")
 @everywhere
 @app_commands.describe(
-    texte="Le texte ou brouillon à reformuler",
-    style="Le style d'écriture souhaité"
+    affirmation="L'info, la rumeur ou ce que quelqu'un vient d'affirmer dans la discussion"
+)
+async def verifier_command(interaction: discord.Interaction, affirmation: str):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    prompt = f"""Vérifie rigoureusement cette affirmation à l'aide des informations récentes sur le web :
+« {affirmation} »
+
+Réponds en français exactement selon cette structure :
+VERDICT : (écris ✅ VRAI, ❌ FAUX / MYTHO, ou ⚠️ NUANCÉ / INCOMPLET)
+PREUVE : (2 à 3 phrases claires avec les vrais chiffres, dates ou faits vérifiés)
+===REPLIQUE===
+(une phrase naturelle et stylée prête à copier-coller dans une discussion Discord pour rétablir les faits sans passer pour un robot)"""
+
+    try:
+        raw = await ask_gemini(prompt, use_search=True)
+        body, replique = raw, ""
+        if "===REPLIQUE===" in raw:
+            parts = raw.split("===REPLIQUE===", 1)
+            body = parts[0].strip()
+            replique = parts[1].strip().strip("«»\"")
+
+        desc = f"**Affirmation testée :** *« {affirmation[:180]} »*\n\n{body}"
+        if replique:
+            desc += f"\n\n💬 **Phrase prête à envoyer dans le chat :**\n```\n{replique}\n```"
+
+        color = discord.Color.green() if "✅" in body else (discord.Color.red() if "❌" in body else discord.Color.orange())
+        embed = discord.Embed(title="🕵️ Bat-Vérificateur & Détecteur de Mytho", description=desc[:3900], color=color)
+        embed.set_footer(text="100% Furtif (visible uniquement par toi) • Vérifié via Google Search")
+        view = RawCopyView(interaction.user.id, replique) if replique else ShareEmbedView(interaction.user.id, embed)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur lors de la vérification : `{e}`", ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  OUTILS DE CONVERSATION : REFORMULATION & RÉPARTIES (100% FURTIFS)
+# ══════════════════════════════════════════════════════════════
+REFORMULER_STYLES = [
+    app_commands.Choice(name="📱 Message Discord ultra-naturel (SMS / Décontracté)", value="Message Discord spontané, naturel, décontracté, sans ponctuation rigide ni ton IA"),
+    app_commands.Choice(name="🔤 Zéro faute (garde mon ton exact mais corrige)", value="Corrige uniquement l'orthographe et la grammaire tout en gardant exactement le même niveau de langage"),
+    app_commands.Choice(name="💼 Professionnel & Poli (Mail / Sérieux)", value="Professionnel, courtois, soutenu et irréprochable"),
+    app_commands.Choice(name="⚡ Clash percutant & sans pitié", value="Cinglant, tranchant, répartie affûtée sans insultes"),
+    app_commands.Choice(name="🤝 Diplomate & Calme", value="Diplomatique, bienveillant, posé et apaisant"),
+    app_commands.Choice(name="😂 Drôle & Second degré", value="Drôle, auto-dérision, second degré et plein d'esprit"),
+    app_commands.Choice(name="📏 Ultra-court & Direct", value="Ultra court, 3 à 8 mots max, droit au but"),
+    app_commands.Choice(name="🦇 Style Batman", value="Sombre, laconique, charismatique et percutant")
+]
+
+@bot.tree.command(name="reformuler", description="Réécrit ou corrige ton message en mode furtif avant de l'envoyer")
+@everywhere
+@app_commands.describe(
+    texte="Ton brouillon ou ce que tu veux dire",
+    style="Le style souhaité"
 )
 @app_commands.choices(style=REFORMULER_STYLES)
 async def reformuler(
@@ -1698,58 +2013,58 @@ async def reformuler(
     await interaction.response.defer(ephemeral=True, thinking=True)
     prompt = (
         f"Reformule le texte suivant dans ce style : « {style.value} ».\n"
-        f"Conserve l'idée d'origine mais maximise l'impact du message.\n"
-        f"Ne donne QUE le texte final réécrit, sans intro ni commentaires :\n\n{texte}"
+        f"Conserve l'idée d'origine, sonne 100% humain.\n"
+        f"Ne donne QUE le texte final réécrit, sans guillemets ni commentaires :\n\n{texte}"
     )
     try:
-        result = await ask_gemini(prompt)
+        result = (await ask_gemini(prompt)).strip().strip("«»\"")
         embed = discord.Embed(
-            title=f"✍️ Reformulation ({style.name})",
-            description=f"**Original :**\n> *« {texte} »*\n\n**Résultat :**\n```\n{result[:1800]}\n```",
+            title=f"✍️ Message prêt ({style.name})",
+            description=f"**Ton brouillon :**\n> *« {texte[:300]} »*\n\n**À copier :**\n```\n{result[:1800]}\n```",
             color=discord.Color.blue()
         )
-        embed.set_footer(text="Visible uniquement par toi • Prêt à copier !")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.set_footer(text="100% Furtif • Clique sur « Copier le texte pur » pour mobile/PC !")
+        await interaction.followup.send(embed=embed, view=RawCopyView(interaction.user.id, result), ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur : `{e}`", ephemeral=True)
 
 
-@bot.tree.command(name="repartie", description="Génère des réparties et punchlines mémorables")
+@bot.tree.command(name="repartie", description="Génère 3 réparties cinglantes en mode furtif (personne ne le voit !)")
 @everywhere
 @app_commands.describe(
-    sujet="La pique reçue, le sujet ou ce qu'on vient de te dire",
+    sujet="La pique reçue, le message ou la situation",
     intensite="Niveau d'intensité de la répartie"
 )
 @app_commands.choices(intensite=[
-    app_commands.Choice(name="😄 Taquin & Bon enfant", value="taquin"),
-    app_commands.Choice(name="🔥 Piquant & Mordant", value="piquant"),
-    app_commands.Choice(name="⚡ Clash destructeur (sans vulgarité)", value="clash"),
-    app_commands.Choice(name="🦇 Punchline Batman", value="batman")
+    app_commands.Choice(name="😄 Taquin & Bon enfant", value="taquin et drôle entre potes"),
+    app_commands.Choice(name="🔥 Piquant & Mordant", value="piquant, malin et plein d'esprit"),
+    app_commands.Choice(name="⚡ Clash destructeur (sans insultes)", value="clash chirurgical et dévastateur mais sans vulgarité"),
+    app_commands.Choice(name="🦇 Punchline Batman", value="froid, calme et charismatique façon Batman")
 ])
 async def repartie(
     interaction: discord.Interaction,
     sujet: str,
     intensite: app_commands.Choice[str] = None
 ):
-    await interaction.response.defer(thinking=True)
-    lvl = intensite.value if intensite else "piquant"
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    lvl = intensite.value if intensite else "piquant, malin et plein d'esprit"
     prompt = (
-        f"Génère 3 réparties ou punchlines cinglantes, spirituelles et intelligentes (sans insultes) "
-        f"pour répliquer à cette phrase ou situation : « {sujet} ».\n"
-        f"Niveau d'intensité : {lvl}.\n"
-        f"Présente-les en 3 puces numérotées bien espacées avec des emojis adaptés."
+        f"Génère 3 réparties naturelles sur Discord (pas de phrases de vieux livre, du vrai répondant crédible et spontané, sans insultes vulgaires) "
+        f"pour répondre à : « {sujet} ».\n"
+        f"Ton : {lvl}.\n"
+        f"Présente chaque répartie dans son propre bloc de code ``` pour pouvoir la copier en 1 clic."
     )
     try:
         res = await ask_gemini(prompt)
         embed = discord.Embed(
-            title="⚡ Réparties & Punchlines IA",
-            description=f"**En réponse à :**\n> *« {sujet[:150]} »*\n\n{res[:1800]}",
+            title="⚡ 3 Réparties Furtives",
+            description=f"**Face à :** *« {sujet[:150]} »*\n\n{res[:3500]}",
             color=discord.Color.dark_red()
         )
-        embed.set_footer(text="Fourni par Batman • À utiliser avec modération 😉")
-        await interaction.followup.send(embed=embed)
+        embed.set_footer(text="100% Furtif (visible uniquement par toi) • Copie ta préférée !")
+        await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"⚠️ Erreur : `{e}`")
+        await interaction.followup.send(f"⚠️ Erreur : `{e}`", ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1899,437 +2214,6 @@ async def imagine_command(interaction: discord.Interaction, prompt: str):
         await interaction.followup.send(embed=embed, file=file, view=view)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
-
-
-# ══════════════════════════════════════════════════════════════
-#  BAT-ADMINISTRATION & MODÉRATION D'ÉLITE (ADMIN ONLY)
-# ══════════════════════════════════════════════════════════════
-
-class ConfirmSanctionView(discord.ui.View):
-    def __init__(self, author_id: int, target: discord.Member, action: str, reason: str, delete_days: int = 0):
-        super().__init__(timeout=60)
-        self.author_id = author_id
-        self.target = target
-        self.action = action
-        self.reason = reason
-        self.delete_days = delete_days
-
-    @discord.ui.button(label="Confirmer la sanction", style=discord.ButtonStyle.danger, emoji="⚠️")
-    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("❌ Tu n'es pas l'auteur de cette commande.", ephemeral=True)
-        try:
-            if self.action == "kick":
-                await self.target.kick(reason=self.reason)
-                emb = discord.Embed(
-                    title="👢 Membre expulsé",
-                    description=f"**{self.target.mention}** a été expulsé par {interaction.user.mention}.\n**Raison :** {self.reason}",
-                    color=discord.Color.red()
-                )
-            else:
-                await self.target.ban(reason=self.reason, delete_message_days=self.delete_days)
-                emb = discord.Embed(
-                    title="🔨 Membre banni définitivement",
-                    description=f"**{self.target.mention}** a été banni par {interaction.user.mention}.\n**Raison :** {self.reason}",
-                    color=discord.Color.dark_red()
-                )
-            self.stop()
-            await interaction.response.edit_message(embed=emb, view=None)
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Échec de la sanction : `{e}`", ephemeral=True)
-
-    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, emoji="❌")
-    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("❌ Tu n'es pas l'auteur de cette commande.", ephemeral=True)
-        self.stop()
-        await interaction.response.edit_message(content="🛑 Action annulée.", embed=None, view=None)
-
-class ConfirmNukeView(discord.ui.View):
-    def __init__(self, author_id: int):
-        super().__init__(timeout=30)
-        self.author_id = author_id
-
-    @discord.ui.button(label="Confirmer le NUKE (Effacer le salon)", style=discord.ButtonStyle.danger, emoji="💥")
-    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
-        channel = interaction.channel
-        pos = channel.position
-        try:
-            new_channel = await channel.clone(reason=f"Nuke ordonné par {interaction.user.display_name}")
-            await channel.delete(reason="Nuke channel")
-            await new_channel.edit(position=pos)
-            emb = discord.Embed(
-                title="💥 SALON REMIS À NEUF (NUKE)",
-                description=f"Ce salon a été complètement éradiqué et recréé par {interaction.user.mention} !\nTout le spam et l'historique ont disparu.",
-                color=discord.Color.red()
-            )
-            emb.set_image(url="https://media.giphy.com/media/oe33xf3B50fsc/giphy.gif")
-            await new_channel.send(embed=emb)
-        except Exception as e:
-            await interaction.followup.send(f"⚠️ Erreur lors du nuke : `{e}`")
-
-    @discord.ui.button(label="Annuler", style=discord.ButtonStyle.secondary, emoji="❌")
-    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if interaction.user.id != self.author_id:
-            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
-        self.stop()
-        await interaction.response.edit_message(content="🛑 Nuke annulé avec succès.", embed=None, view=None)
-
-# 1. /clear
-@bot.tree.command(name="clear", description="🧹 Nettoie les messages du salon avec filtres précis (Admin)")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(
-    nombre="Nombre de messages à examiner et supprimer (1 à 100)",
-    membre="Supprimer uniquement les messages de ce membre spécifique",
-    bots_only="Supprimer uniquement les messages envoyés par des bots",
-    contenant="Supprimer uniquement les messages contenant ce mot-clé ou texte"
-)
-async def clear(
-    interaction: discord.Interaction,
-    nombre: int = 10,
-    membre: discord.Member = None,
-    bots_only: bool = False,
-    contenant: str = None
-):
-    await interaction.response.defer(ephemeral=True)
-    limit = max(1, min(nombre, 100))
-
-    def check_msg(m: discord.Message) -> bool:
-        if membre and m.author.id != membre.id:
-            return False
-        if bots_only and not m.author.bot:
-            return False
-        if contenant and contenant.lower() not in (m.clean_content or m.content).lower():
-            return False
-        return True
-
-    try:
-        deleted = await interaction.channel.purge(limit=limit, check=check_msg)
-        filt_details = []
-        if membre: filt_details.append(f"de {membre.display_name}")
-        if bots_only: filt_details.append("de bots uniquement")
-        if contenant: filt_details.append(f"contenant « {contenant} »")
-        filt_str = f" ({', '.join(filt_details)})" if filt_details else ""
-
-        embed = discord.Embed(
-            title="🧹 Nettoyage Bat-Sécurité réussi",
-            description=f"**{len(deleted)} message(s)** supprimé(s){filt_str}.",
-            color=discord.Color.green()
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"⚠️ Erreur lors du nettoyage : `{e}`", ephemeral=True)
-
-# 2. /scan_salon
-@bot.tree.command(name="scan_salon", description="🛡️ Audit IA de sécurité : analyse l'ambiance et les risques des 50 derniers messages")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-async def scan_salon(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    messages_data = []
-    try:
-        async for m in interaction.channel.history(limit=50):
-            if not m.author.bot and m.clean_content:
-                messages_data.append(f"[{m.author.display_name}]: {m.clean_content[:150]}")
-        messages_data.reverse()
-    except Exception as e:
-        return await interaction.followup.send(f"⚠️ Impossible de lire les messages : `{e}`", ephemeral=True)
-
-    if len(messages_data) < 5:
-        return await interaction.followup.send("❌ Pas assez de messages récents pour un audit pertinent.", ephemeral=True)
-
-    sample_text = "\n".join(messages_data[-35:])
-    prompt = f"""Tu es l'analyste de sécurité et de modération Batman pour ce serveur Discord.
-Voici les derniers messages échangés dans le salon :
-{sample_text}
-
-Effectue un audit rapide et structuré :
-1. Score de Toxicité & Risque (sur 100, ex: 15/100 si calme, 85/100 si embrouille ou spam)
-2. Climat général (Calme, Taquin, Conflit, Trolling, Raid, Scam)
-3. Détection d'anomalies (Insultes, liens suspects, drama, harcèlement)
-4. Conseil tactique pour l'administrateur
-
-Reste concis, clair et percutant dans le style Batman."""
-
-    try:
-        audit_res = await ask_gemini(prompt)
-        embed = discord.Embed(
-            title="🛡️ Bat-Audit de Sécurité du Salon",
-            description=audit_res,
-            color=discord.Color.gold()
-        )
-        embed.set_footer(text=f"Salon : #{interaction.channel.name} • 50 messages analysés")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
-
-# 3. /lock & /unlock
-@bot.tree.command(name="lock", description="🔒 Verrouille le salon (interdit aux membres d'écrire en cas d'urgence)")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(raison="Raison du verrouillage (ex: Raid, Spams, Conflit)")
-async def lock(interaction: discord.Interaction, raison: str = "Intervention de la Bat-Sécurité"):
-    try:
-        default_role = interaction.guild.default_role
-        await interaction.channel.set_permissions(default_role, send_messages=False)
-        embed = discord.Embed(
-            title="🔒 Salon Verrouillé",
-            description=f"Ce salon a été temporairement fermé par {interaction.user.mention}.\n**Raison :** {raison}",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        await interaction.response.send_message(f"⚠️ Impossible de verrouiller : `{e}`", ephemeral=True)
-
-@bot.tree.command(name="unlock", description="🔓 Déverrouille le salon")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-async def unlock(interaction: discord.Interaction):
-    try:
-        default_role = interaction.guild.default_role
-        await interaction.channel.set_permissions(default_role, send_messages=None)
-        embed = discord.Embed(
-            title="🔓 Salon Déverrouillé",
-            description="Le calme est rétabli. Vous pouvez à nouveau écrire dans ce salon.",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        await interaction.response.send_message(f"⚠️ Impossible de déverrouiller : `{e}`", ephemeral=True)
-
-# 4. /slowmode
-@bot.tree.command(name="slowmode", description="⏱️ Règle le mode ralenti du salon")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(secondes="Délai d'attente en secondes entre chaque message (0 pour désactiver, max 21600)")
-async def slowmode(interaction: discord.Interaction, secondes: int = 5):
-    sec = max(0, min(secondes, 21600))
-    try:
-        await interaction.channel.edit(slowmode_delay=sec)
-        if sec == 0:
-            msg = "⚡ Mode ralenti **désactivé** sur ce salon."
-            col = discord.Color.green()
-        else:
-            msg = f"⏱️ Mode ralenti configuré à **{sec} seconde(s)** par message."
-            col = discord.Color.orange()
-        embed = discord.Embed(description=msg, color=col)
-        await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        await interaction.response.send_message(f"⚠️ Erreur : `{e}`", ephemeral=True)
-
-# 5. /annonce
-ADMIN_COLOR_CHOICES = [
-    app_commands.Choice(name="🖤 Noir Batman", value="dark"),
-    app_commands.Choice(name="🟡 Or / Jaune", value="gold"),
-    app_commands.Choice(name="🔴 Rouge Alerte", value="red"),
-    app_commands.Choice(name="🔵 Bleu Électrique", value="blue"),
-    app_commands.Choice(name="🟢 Vert Succès", value="green"),
-    app_commands.Choice(name="🟣 Violet Mystique", value="purple"),
-]
-
-ADMIN_COLOR_MAP = {
-    "dark": discord.Color.dark_theme(),
-    "gold": discord.Color.gold(),
-    "red": discord.Color.red(),
-    "blue": discord.Color.blue(),
-    "green": discord.Color.green(),
-    "purple": discord.Color.purple(),
-}
-
-@bot.tree.command(name="annonce", description="📢 Publie une annonce officielle de haut niveau")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(
-    titre="Titre principal de l'annonce",
-    message="Contenu de l'annonce (supports markdown, emojis)",
-    couleur="Couleur d'accent de l'annonce",
-    mention="Mentionner un groupe de membres",
-    salon="Salon où diffuser l'annonce (ce salon par défaut)"
-)
-@app_commands.choices(
-    couleur=ADMIN_COLOR_CHOICES,
-    mention=[
-        app_commands.Choice(name="Aucune mention", value="none"),
-        app_commands.Choice(name="@everyone (Tous les membres)", value="everyone"),
-        app_commands.Choice(name="@here (Membres connectés)", value="here")
-    ]
-)
-async def annonce(
-    interaction: discord.Interaction,
-    titre: str,
-    message: str,
-    couleur: app_commands.Choice[str] = None,
-    mention: app_commands.Choice[str] = None,
-    salon: discord.TextChannel = None
-):
-    target_channel = salon or interaction.channel
-    c_color = ADMIN_COLOR_MAP.get(couleur.value, discord.Color.gold()) if couleur else discord.Color.gold()
-
-    embed = discord.Embed(
-        title=f"📢 {titre}",
-        description=message,
-        color=c_color,
-        timestamp=datetime.now(timezone.utc)
-    )
-    embed.set_author(name=interaction.guild.name, icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
-    embed.set_footer(text=f"Annonce officielle par {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
-
-    ping_text = ""
-    if mention and mention.value == "everyone":
-        ping_text = "@everyone"
-    elif mention and mention.value == "here":
-        ping_text = "@here"
-
-    try:
-        await target_channel.send(content=ping_text if ping_text else None, embed=embed)
-        await interaction.response.send_message(f"✅ Annonce publiée dans {target_channel.mention} !", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"⚠️ Impossible d'envoyer l'annonce : `{e}`", ephemeral=True)
-
-# 6. /say
-@bot.tree.command(name="say", description="🗣️ Envoie un message via Batman dans un salon")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(texte="Le texte à faire dire par Batman", salon="Salon cible (optionnel)")
-async def say(interaction: discord.Interaction, texte: str, salon: discord.TextChannel = None):
-    target = salon or interaction.channel
-    try:
-        await target.send(texte)
-        await interaction.response.send_message(f"✅ Message envoyé dans {target.mention} !", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"⚠️ Impossible d'envoyer : `{e}`", ephemeral=True)
-
-# 7. /timeout & /untimeout
-@bot.tree.command(name="timeout", description="🔇 Isole un membre temporairement (Mute)")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(
-    membre="Le membre à mettre en sourdine",
-    minutes="Durée en minutes (ex: 5, 60, 1440 pour 1 jour)",
-    raison="Raison de la sanction"
-)
-async def timeout_member(interaction: discord.Interaction, membre: discord.Member, minutes: int = 10, raison: str = "Non-respect des règles"):
-    if membre.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
-        return await interaction.response.send_message("❌ Tu ne peux pas sanctionner un membre ayant un rôle supérieur ou égal au tien.", ephemeral=True)
-
-    mins = max(1, min(minutes, 40320))
-    until = datetime.now(timezone.utc) + timedelta(minutes=mins)
-    try:
-        await membre.timeout(until, reason=raison)
-        embed = discord.Embed(
-            title="🔇 Membre Mis en Sourdine",
-            description=f"**{membre.mention}** a été exclu temporairement pendant **{mins} minute(s)**.\n**Raison :** {raison}",
-            color=discord.Color.orange()
-        )
-        await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        await interaction.response.send_message(f"⚠️ Erreur : `{e}`", ephemeral=True)
-
-@bot.tree.command(name="untimeout", description="🔊 Rétablit la parole d'un membre")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(membre="Le membre à libérer de sourdine")
-async def untimeout_member(interaction: discord.Interaction, membre: discord.Member):
-    try:
-        await membre.timeout(None, reason=f"Levé par {interaction.user.display_name}")
-        await interaction.response.send_message(f"🔊 {membre.mention} peut à nouveau parler !", ephemeral=False)
-    except Exception as e:
-        await interaction.response.send_message(f"⚠️ Erreur : `{e}`", ephemeral=True)
-
-# 8. /kick & /ban
-@bot.tree.command(name="kick", description="👢 Expulse un membre du serveur (avec confirmation)")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(membre="Membre à expulser", raison="Raison de l'expulsion")
-async def kick_cmd(interaction: discord.Interaction, membre: discord.Member, raison: str = "Non-respect des règles"):
-    if membre.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
-        return await interaction.response.send_message("❌ Tu ne peux pas expulser un membre supérieur ou égal à toi.", ephemeral=True)
-    embed = discord.Embed(
-        title="⚠️ Confirmation d'Expulsion",
-        description=f"Es-tu certain de vouloir expulser **{membre.display_name}** ({membre.mention}) ?\n**Raison :** {raison}",
-        color=discord.Color.orange()
-    )
-    view = ConfirmSanctionView(interaction.user.id, membre, "kick", raison)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-@bot.tree.command(name="ban", description="🔨 Bannit définitivement un membre du serveur (avec confirmation)")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(
-    membre="Membre à bannir",
-    raison="Raison du bannissement",
-    supprimer_jours_messages="Supprimer l'historique de ses messages (0 à 7 jours)"
-)
-async def ban_cmd(interaction: discord.Interaction, membre: discord.Member, raison: str = "Violation grave des règles", supprimer_jours_messages: int = 1):
-    if membre.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
-        return await interaction.response.send_message("❌ Tu ne peux pas bannir un membre supérieur ou égal à toi.", ephemeral=True)
-    days = max(0, min(supprimer_jours_messages, 7))
-    embed = discord.Embed(
-        title="🚨 Confirmation de Bannissement Définitif",
-        description=f"Es-tu certain de vouloir **bannir définitivement** {membre.mention} ({membre.display_name}) ?\n"
-                    f"**Raison :** {raison}\n"
-                    f"**Suppression des messages :** {days} jour(s)",
-        color=discord.Color.red()
-    )
-    view = ConfirmSanctionView(interaction.user.id, membre, "ban", raison, delete_days=days)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-
-# 9. /audit_membre
-@bot.tree.command(name="audit_membre", description="🕵️ Fiche d'enquête Bat-Computer sur un membre")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-@app_commands.describe(membre="Le membre à enquêter")
-async def audit_membre(interaction: discord.Interaction, membre: discord.Member):
-    created_ts = int(membre.created_at.timestamp())
-    joined_ts = int(membre.joined_at.timestamp()) if membre.joined_at else None
-
-    account_age_days = (datetime.now(timezone.utc) - membre.created_at).days
-    is_suspicious = account_age_days < 7
-
-    roles_list = [r.mention for r in membre.roles if r.name != "@everyone"]
-    roles_str = ", ".join(roles_list) if roles_list else "Aucun rôle particulier"
-
-    perms = membre.guild_permissions
-    key_perms = []
-    if perms.administrator: key_perms.append("👑 Administrateur")
-    if perms.manage_guild: key_perms.append("🏛️ Gérer le serveur")
-    if perms.ban_members: key_perms.append("🔨 Bannir des membres")
-    if perms.kick_members: key_perms.append("👢 Expulser des membres")
-    if perms.manage_messages: key_perms.append("🧹 Gérer les messages")
-    if perms.mention_everyone: key_perms.append("📢 Mentionner everyone")
-    perms_str = "\n".join(f"• {p}" for p in key_perms) if key_perms else "• Membre standard (sans permissions sensibles)"
-
-    embed = discord.Embed(
-        title=f"🕵️ Bat-Fiche d'Enquête : {membre.display_name}",
-        color=discord.Color.red() if is_suspicious else discord.Color.dark_theme()
-    )
-    embed.set_thumbnail(url=membre.display_avatar.url)
-    embed.add_field(name="👤 Identité", value=f"**Pseudo :** {membre.name}\n**ID :** `{membre.id}`\n**Mention :** {membre.mention}", inline=False)
-    embed.add_field(name="📅 Dates Clés", value=f"• **Compte créé le :** <t:{created_ts}:D> (<t:{created_ts}:R>)\n• **A rejoint le :** <t:{joined_ts}:D> (<t:{joined_ts}:R>)" if joined_ts else f"• **Compte créé le :** <t:{created_ts}:D>", inline=False)
-
-    if is_suspicious:
-        embed.add_field(name="⚠️ Alerte de Sécurité", value="🚨 **Compte créé il y a moins de 7 jours !** Risque potentiel de double-compte (alt) ou de raid.", inline=False)
-
-    embed.add_field(name=f"🏷️ Rôles ({len(roles_list)})", value=roles_str[:1020], inline=False)
-    embed.add_field(name="🔑 Permissions Sensibles", value=perms_str, inline=False)
-    embed.set_footer(text=f"Demandé par {interaction.user.display_name}")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# 10. /nuke
-@bot.tree.command(name="nuke", description="💥 Recrée ce salon à neuf pour éradiquer tout le spam (Irréversible)")
-@app_commands.default_permissions(administrator=True)
-@app_commands.guild_only()
-async def nuke(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="⚠️ ATTENTION : ALERTE NUKE",
-        description=f"Tu es sur le point de **supprimer l'intégralité des messages de ce salon (#{interaction.channel.name})** en le recréant à l'identique !\n\nCette action est **100% irréversible**.",
-        color=discord.Color.red()
-    )
-    view = ConfirmNukeView(interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════
