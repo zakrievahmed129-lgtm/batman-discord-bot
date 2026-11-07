@@ -663,27 +663,55 @@ async def note_ajouter(interaction: discord.Interaction, titre: str, contenu: st
 
 
 # ══════════════════════════════════════════════════════════════
-#  /ia  —  Assistant IA Gemini
+#  /ia  —  Assistant IA Gemini (avec fallback automatique)
 # ══════════════════════════════════════════════════════════════
-@bot.tree.command(name="ia", description="Pose une question à l'IA (Gemini 2.5 Flash)")
+@bot.tree.command(name="ia", description="Pose une question à l'IA")
 @everywhere
 @app_commands.describe(question="Ta question, texte à résumer ou consigne")
 async def ia_command(interaction: discord.Interaction, question: str):
-    if not GEMINI_KEY:
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
         return await interaction.response.send_message(
             "💡 Active l'IA en ajoutant `GEMINI_API_KEY` sur Render.\n"
             "Clé gratuite : https://aistudio.google.com/app/apikey", ephemeral=True)
     await interaction.response.defer(thinking=True)
     try:
         from google import genai
-        client = genai.Client(api_key=GEMINI_KEY)
-        resp = client.models.generate_content(model="gemini-3.8-flash", contents=question)
-        answer = (resp.text or "Pas de réponse.")[:1900]
+        client = genai.Client(api_key=gemini_key)
+        
+        # Liste de modèles du plus fluide / disponible au secours
+        models_to_try = [
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash-lite",
+            "gemini-3.8-flash"
+        ]
+        
+        answer = None
+        used_model = None
+        last_error = None
+
+        for m in models_to_try:
+            try:
+                resp = client.models.generate_content(model=m, contents=question)
+                if resp.text:
+                    answer = resp.text
+                    used_model = m
+                    break
+            except Exception as err:
+                last_error = err
+                continue
+
+        if not answer:
+            raise last_error or Exception("Impossible d'obtenir une réponse de l'IA.")
+
+        if len(answer) > 1900:
+            answer = answer[:1900] + "… *(suite tronquée)*"
+
         embed = discord.Embed(title="🧠 Réponse IA", description=answer, color=discord.Color.teal())
-        embed.set_footer(text=f"Q: {question[:90]}")
+        embed.set_footer(text=f"Q: {question[:80]} • Modèle: {used_model}")
         await interaction.followup.send(embed=embed)
     except Exception as e:
-        await interaction.followup.send(f"⚠️ `{e}`")
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
 
 
 # ══════════════════════════════════════════════════════════════
