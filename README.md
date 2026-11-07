@@ -23,19 +23,14 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 * /rappel : Minuteur avec alerte automatique en message privé (MP).
 * /chrono : Minuteur de travail Pomodoro.
 
-### 🧠 Intelligence Artificielle, Clone de Style & Conversation
-* /ia question [image] : Pose tes questions à Gemini avec mémoire continue du fil de discussion et vision multimodale.
-* /ia_memoire : Consulte ce que l'IA a en mémoire sur vos échanges récents.
-* /ia_reset : Efface l'historique conversationnel pour repartir à zéro.
-* /scanner_mon_style [nombre] : Scanne automatiquement tes messages récents dans le salon pour apprendre ta vraie façon d'écrire sans rien copier-coller !
-* /mon_style [preset] [description] : Enregistre ou fais analyser par l'IA tes tics de langage et ta façon de parler pour les réponses automatiques.
-* /reponds_pour_moi message [intention] : Génère 3 réponses parfaites (dans ton style, piquante ou diplomate) prêtes à envoyer.
-* /repondre_discussion [nb_messages] [intention] : Lit tout le fil récent de la discussion dans le salon pour te proposer une réponse parfaitement dans le contexte !
-* /reformuler texte style : Réécris n'importe quel texte ou brouillon (Professionnel, Clash sans pitié, Batman Noir, Diplomate, Humoristique...).
-* /repartie sujet [intensite] : Génère 3 punchlines et réparties immédiates pour clouer le bec sans vulgarité.
-* /afk [raison] : Active ton mode absence ; Batman prévient automatiquement ceux qui te mentionnent et t'accueille à ton retour.
-* /image description [style] [format] : Génère une image originale en haute définition via l'IA avec boutons de régénération et choix de ratios (1:1, 16:9, 9:16...).
+### 🧠 Intelligence Artificielle & Outils Automatiques
+* **Analyse & Clonage 100% Automatique** : Aucun paramétrage nécessaire ! Batman apprend automatiquement ta façon d'écrire quand tu parles dans le chat et lit le fil des discussions en direct.
+* /ia question [image] : Pose tes questions à Gemini avec mémoire continue et analyse d'image/photo.
+* /image description [style] [format] : Génère une image originale en haute définition via l'IA avec boutons interactifs de régénération et choix de ratios.
 * /imagine prompt : Raccourci rapide pour générer une illustration artistique par IA.
+* /reformuler texte style : Réécris n'importe quel texte ou brouillon (Professionnel, Clash, Batman, Diplomate...).
+* /repartie sujet [intensite] : Génère 3 punchlines percutantes sans vulgarité.
+* /afk [raison] : Active ton mode absence ; Batman prévient automatiquement ceux qui te mentionnent et t'accueille à ton retour.
 * /traduire texte + langue : Traduction instantanée ultra-naturelle dans toutes les langues.
 * /meteo ville : Météo en direct sans clé d'API.
 * /calcul expression : Calculatrice scientifique complète.
