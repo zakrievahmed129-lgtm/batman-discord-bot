@@ -42,7 +42,9 @@ def save_json(fp, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 intents = discord.Intents.default()
-intents.message_content = True
+# intents.message_content est intentionnellement laissé à False pour éviter
+# le crash PrivilegedIntentsRequired au déploiement (Render / hébergement).
+# Toutes les commandes slash et menus contextuels fonctionnent à 100% sans ce privilège !
 bot = commands.Bot(command_prefix="!", intents=intents)
 start_time = datetime.now(timezone.utc)
 
@@ -633,18 +635,19 @@ class GhostwriterView(discord.ui.View):
                 await interaction.channel.send(content=content)
                 sent = True
                 await interaction.response.send_message(f"✅ Option {opt_num} envoyée dans le salon !", ephemeral=True)
-            except discord.Forbidden:
+            except (discord.Forbidden, discord.HTTPException):
+                # 403 Forbidden ou 50001 Missing Access (bot en User App non membre du salon)
                 err_embed = discord.Embed(
-                    title="🔒 Permission manquante dans ce salon (403)",
+                    title="📋 Réponse prête à envoyer",
                     description=(
-                        "Batman ne peut pas poster directement dans ce salon car :\n"
-                        "• Soit le bot n'a pas été **invité sur ce serveur** avec la permission d'écrire (tu l'utilises en tant qu'application utilisateur personnelle).\n"
-                        "• Soit il manque la permission **Envoyer des messages** dans ce salon précis.\n\n"
-                        "📋 **Copie simplement le texte ci-dessous pour l'envoyer toi-même :**\n"
+                        "Comme Batman est installé sur ton compte (User App) et n'est pas membre de ce serveur, "
+                        "Discord ne l'autorise pas à envoyer le message à ta place.\n\n"
+                        "✨ **Copie simplement le message ci-dessous et colle-le dans le chat :**\n"
                         f"```\n{text}\n```"
                     ),
-                    color=discord.Color.orange()
+                    color=discord.Color.blue()
                 )
+                err_embed.set_footer(text="💡 Astuce : Sur PC ou mobile, clique sur l'icône copier en haut à droite du cadre !")
                 if interaction.response.is_done():
                     await interaction.followup.send(embed=err_embed, ephemeral=True)
                 else:
@@ -693,6 +696,21 @@ async def context_reply_for_me(interaction: discord.Interaction, message: discor
                     if m.author.id == interaction.user.id and len(txt) > 3:
                         user_samples_in_convo.append(txt)
             convo_lines.reverse()
+        except Exception:
+            pass
+
+    # Apprentissage automatique passif : mémoriser les expressions de l'utilisateur détectées
+    if user_samples_in_convo:
+        try:
+            styles = load_json(STYLES_FILE)
+            u_style = styles.get(uid, {"label": "Apprentissage continu", "rules": DEFAULT_STYLE, "recent_messages": []})
+            recent = u_style.get("recent_messages", [])
+            for s in user_samples_in_convo:
+                if s not in recent:
+                    recent.append(s[:250])
+            u_style["recent_messages"] = recent[-30:]
+            styles[uid] = u_style
+            save_json(STYLES_FILE, styles)
         except Exception:
             pass
 
