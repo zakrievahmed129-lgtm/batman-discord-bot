@@ -3,26 +3,25 @@ import json
 import asyncio
 import re
 import random
+import math
 from datetime import datetime, timezone
 import aiohttp
 from aiohttp import web
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 # ─────────────────────────── CONFIG ───────────────────────────
 load_dotenv()
 
 TOKEN      = os.getenv("DISCORD_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 PORT       = int(os.getenv("PORT", "8080"))
 
 DATA_DIR    = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 NOTES_FILE  = os.path.join(DATA_DIR, "notes.json")
 TODOS_FILE  = os.path.join(DATA_DIR, "todos.json")
-TIMER_FILE  = os.path.join(DATA_DIR, "timers.json")
 
 def load_json(fp):
     if os.path.exists(fp):
@@ -62,18 +61,36 @@ async def start_web_server():
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     print(f"🌐 Keep-alive server on port {PORT}", flush=True)
 
+# ─────────────────── ROTATION DU STATUT H24 ───────────────────
+PRESENCE_ACTIVITIES = [
+    (discord.ActivityType.playing, "Sauver Gotham City 🦇"),
+    (discord.ActivityType.playing, "Roblox (en cachette) 🤫🎮"),
+    (discord.ActivityType.watching, "tes tâches dans /todo 📋"),
+    (discord.ActivityType.listening, "les murmures de Gotham 🌙"),
+    (discord.ActivityType.watching, "/aide | Ton assistant ⚡")
+]
+
+@tasks.loop(minutes=5)
+async def rotate_presence():
+    act_type, name = random.choice(PRESENCE_ACTIVITIES)
+    await bot.change_presence(activity=discord.Activity(type=act_type, name=name))
+
+@rotate_presence.before_loop
+async def before_rotate():
+    await bot.wait_until_ready()
+
 # ─────────────────────── ON READY ─────────────────────────────
 @bot.event
 async def on_ready():
     print(f"✅ Connected as {bot.user} ({bot.user.id})", flush=True)
     try:
         synced = await bot.tree.sync()
-        print(f"⚡ {len(synced)} slash commands synced.", flush=True)
+        print(f"⚡ {len(synced)} interactions synced (slash + context menus).", flush=True)
     except Exception as e:
         print(f"⚠️ Sync error: {e}", flush=True)
-    await bot.change_presence(activity=discord.Activity(
-        type=discord.ActivityType.watching, name="/aide | 🦇 Partout avec toi"
-    ))
+    
+    if not rotate_presence.is_running():
+        rotate_presence.start()
 
 # ══════════════════════════════════════════════════════════════
 #  DÉCORATIONS COMMUNES (disponibles partout : serveurs + MP)
@@ -84,46 +101,71 @@ def everywhere(cmd):
     return cmd
 
 # ══════════════════════════════════════════════════════════════
-#  /aide  —  Menu d'aide complet avec pagination boutons
+#  HELPER GEMINI AVEC FALLBACK INTELLIGENT
+# ══════════════════════════════════════════════════════════════
+async def ask_gemini(prompt: str) -> str:
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        return "⚠️ Clé GEMINI_API_KEY manquante."
+    
+    from google import genai
+    client = genai.Client(api_key=key)
+    models = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
+    last_err = None
+    for m in models:
+        try:
+            resp = client.models.generate_content(model=m, contents=prompt)
+            if resp.text:
+                return resp.text.strip()
+        except Exception as e:
+            last_err = e
+            continue
+    raise last_err or Exception("Aucun modèle Gemini n'a pu répondre.")
+
+# ══════════════════════════════════════════════════════════════
+#  /aide  —  Menu d'aide complet avec pagination
 # ══════════════════════════════════════════════════════════════
 HELP_PAGES = [
     {
-        "title": "🦇 Batman — Page 1 / 4 : Essentiels",
+        "title": "🦇 Batman — Page 1/4 : Essentiels",
         "color": discord.Color.dark_theme(),
         "fields": [
-            ("🏓 /ping", "Teste la réactivité du bot et affiche la latence.", False),
-            ("⏰ /rappel", "`duree` + `message` — Programme un rappel (10m, 2h, 1j…). Reçois la notification en MP !", False),
-            ("📊 /stats", "Affiche un résumé de tes activités (tâches, notes, rappels).", False),
-            ("🎲 /dice", "`faces` — Lance un dé à N faces. Fun & jeux de rôle.", False),
+            ("🏓 /ping", "Latence en ms, état du bot et uptime en direct.", False),
+            ("⏰ /rappel", "`duree` + `message` — Rappel automatique livré en MP (ex: 10m, 2h, 1j).", False),
+            ("🦇 /batman", "Punchlines et citations légendaires du Chevalier Noir.", False),
+            ("🎲 /dice", "`faces` + `nombre` — Lance des dés pour le fun ou les jeux de rôle.", False),
+            ("📊 /stats", "Statistiques de ton compte (tâches, notes, uptime).", False),
         ]
     },
     {
-        "title": "🦇 Batman — Page 2 / 4 : To-Do Interactive",
+        "title": "🦇 Batman — Page 2/4 : To-Do & Notes Interactives",
         "color": discord.Color.blue(),
         "fields": [
-            ("✅ /todo", "Tableau de bord interactif : coche d'un clic, ajoute via pop-up, actualise !", False),
-            ("➕ /todo_ajouter", "`tache` — Ajout rapide sans ouvrir le tableau.", False),
-            ("🗑️ /todo_terminer", "`numero` — Supprime une tâche par son numéro.", False),
+            ("📋 /todo", "Tableau interactif complet : coche d'un clic, ajoute par pop-up, modifie !", False),
+            ("➕ /todo_ajouter", "`tache` — Ajout ultra-rapide sans ouvrir le tableau.", False),
+            ("📝 /note", "Dashboard de notes : consulte, ajoute via formulaire, ou supprime.", False),
+            ("📌 /note_ajouter", "`titre` + `contenu` — Sauvegarde rapide d'une idée.", False),
         ]
     },
     {
-        "title": "🦇 Batman — Page 3 / 4 : Notes & Chrono",
+        "title": "🦇 Batman — Page 3/4 : Utilitaires & Jeux",
         "color": discord.Color.purple(),
         "fields": [
-            ("📝 /note", "Tableau de bord interactif pour tes notes : lire, ajouter, supprimer.", False),
-            ("📌 /note_ajouter", "`titre` + `contenu` — Sauvegarde rapide d'une idée.", False),
-            ("⏱️ /chrono", "`duree` + `nom` — Lance un chrono Pomodoro. Alerte à la fin !", False),
-            ("🔄 /rappel_quotidien", "`heure` + `message` — Rappel qui se répète chaque jour à l'heure choisie.", False),
+            ("📊 /sondage", "`question` + `options` — Crée un sondage interactif avec barres de vote en direct !", False),
+            ("🎮 /morpion", "Joue au Morpion (Tic-Tac-Toe) directement dans le chat avec 9 boutons !", False),
+            ("⏱️ /chrono", "`duree` + `nom` — Minuteur Pomodoro qui t'alerte dès la fin.", False),
+            ("🌤️ /meteo", "`ville` — Météo en temps réel sans clé d'API.", False),
+            ("📈 /calcul", "`expression` — Calculatrice avancée avec fonctions mathématiques.", False),
         ]
     },
     {
-        "title": "🦇 Batman — Page 4 / 4 : IA & Outils",
+        "title": "🦇 Batman — Page 4/4 : IA & Clic-Droit Magique",
         "color": discord.Color.teal(),
         "fields": [
-            ("🧠 /ia", "`question` — Demande à Gemini 2.5 Flash de résumer, traduire, brainstormer…", False),
-            ("🌤️ /meteo", "`ville` — Météo actuelle de n'importe quelle ville du monde.", False),
-            ("🔗 /resume", "`url` — Résume automatiquement une page web ou un article.", False),
-            ("📈 /calcul", "`expression` — Calculatrice avancée (avec exposants, parenthèses…)", False),
+            ("🧠 /ia", "`question` — Questionne Gemini 3.1 Flash-Lite (résumés, code, idées).", False),
+            ("🌍 /traduire", "`texte` + `langue` — Traduction instantanée ultra-naturelle avec l'IA.", False),
+            ("🖱️ Clic Droit Message ➜ Apps", "• **🧠 Résumer avec Batman** : Résume n'importe quel message en 1 clic.\n• **📝 Sauvegarder en note** : Enregistre un message directement dans tes notes !", False),
+            ("🖱️ Clic Droit Profil ➜ Apps", "• **🦇 Profil & Avatar HD** : Affiche l'avatar en pleine résolution et les infos de compte.", False),
         ]
     }
 ]
@@ -143,7 +185,7 @@ class HelpView(discord.ui.View):
         embed = discord.Embed(title=p["title"], color=p["color"])
         for name, val, inline in p["fields"]:
             embed.add_field(name=name, value=val, inline=inline)
-        embed.set_footer(text=f"Page {self.page + 1}/{len(HELP_PAGES)} • Hébergé H24 sur Render")
+        embed.set_footer(text=f"Page {self.page + 1}/{len(HELP_PAGES)} • Batman tourne H24 sur Render")
         return embed
 
     @discord.ui.button(label="◀ Précédent", style=discord.ButtonStyle.secondary)
@@ -158,12 +200,305 @@ class HelpView(discord.ui.View):
         self._update_buttons()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-
 @bot.tree.command(name="aide", description="Affiche toutes les fonctionnalités de Batman")
 @everywhere
 async def aide(interaction: discord.Interaction):
     view = HelpView()
     await interaction.response.send_message(embed=view.build_embed(), view=view)
+
+
+# ══════════════════════════════════════════════════════════════
+#  MENUS CONTEXTUELS CLIC-DROIT (Discord Apps)
+# ══════════════════════════════════════════════════════════════
+
+# 1. Clic droit sur un message -> Résumer avec Batman
+@bot.tree.context_menu(name="🧠 Résumer avec Batman")
+@everywhere
+async def context_summarize(interaction: discord.Interaction, message: discord.Message):
+    content = message.clean_content or message.content
+    if not content:
+        return await interaction.response.send_message("❌ Ce message ne contient pas de texte à résumer.", ephemeral=True)
+    
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    prompt = f"Fais un résumé clair et percutant en 2 ou 3 points clés du texte suivant :\n\n{content}"
+    try:
+        summary = await ask_gemini(prompt)
+        embed = discord.Embed(
+            title="🧠 Résumé par Batman",
+            description=summary[:1900],
+            color=discord.Color.teal()
+        )
+        embed.set_footer(text=f"Auteur du message original : {message.author.display_name}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
+
+
+# 2. Clic droit sur un message -> Sauvegarder en note
+@bot.tree.context_menu(name="📝 Sauvegarder en note")
+@everywhere
+async def context_save_note(interaction: discord.Interaction, message: discord.Message):
+    content = message.clean_content or message.content
+    if not content:
+        return await interaction.response.send_message("❌ Ce message ne contient aucun texte à sauvegarder.", ephemeral=True)
+    
+    uid = str(interaction.user.id)
+    notes = load_json(NOTES_FILE)
+    lst = notes.get(uid, [])
+    
+    title = f"Note de {message.author.display_name} ({datetime.now().strftime('%d/%m')})"
+    lst.append({
+        "title": title,
+        "content": content[:1000],
+        "date": datetime.now().strftime("%d/%m %H:%M")
+    })
+    notes[uid] = lst
+    save_json(NOTES_FILE, notes)
+
+    embed = discord.Embed(
+        title="📝 Message sauvegardé dans tes notes !",
+        description=f"**{title}**\n> {content[:200]}...",
+        color=discord.Color.purple()
+    )
+    embed.set_footer(text="Retrouve toutes tes notes avec /note")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# 3. Clic droit sur un membre -> Profil & Avatar HD
+@bot.tree.context_menu(name="🦇 Profil & Avatar HD")
+@everywhere
+async def context_user_info(interaction: discord.Interaction, user: discord.User):
+    created_ts = int(user.created_at.timestamp())
+    avatar_url = user.display_avatar.url
+
+    embed = discord.Embed(
+        title=f"🦇 Profil de {user.name}",
+        description=f"**Pseudo :** `{user.display_name}`\n**ID :** `{user.id}`",
+        color=discord.Color.dark_theme()
+    )
+    embed.add_field(name="📅 Compte créé le", value=f"<t:{created_ts}:D> (<t:{created_ts}:R>)")
+    embed.add_field(name="🤖 Est un bot ?", value="Oui" if user.bot else "Non")
+    embed.set_image(url=avatar_url)
+
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="Télécharger Avatar HD", url=avatar_url, emoji="🖼️"))
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# ══════════════════════════════════════════════════════════════
+#  SONDAGES INTERACTIFS AVEC BARRES DE PROGRESSION (/sondage)
+# ══════════════════════════════════════════════════════════════
+class PollView(discord.ui.View):
+    def __init__(self, question: str, options: list):
+        super().__init__(timeout=86400) # 24 heures
+        self.question = question
+        self.options = options
+        self.votes = {} # user_id -> option_index
+
+        for idx, opt in enumerate(options):
+            btn = discord.ui.Button(
+                label=opt[:80],
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"poll_opt_{idx}",
+                emoji=["1️⃣", "2️⃣", "3️⃣", "4️⃣"][idx]
+            )
+            btn.callback = self.make_callback(idx)
+            self.add_item(btn)
+
+    def make_callback(self, idx: int):
+        async def callback(interaction: discord.Interaction):
+            uid = str(interaction.user.id)
+            self.votes[uid] = idx
+            await interaction.response.edit_message(embed=self.build_embed())
+        return callback
+
+    def build_embed(self) -> discord.Embed:
+        total = len(self.votes)
+        embed = discord.Embed(
+            title=f"📊 Sondage : {self.question}",
+            color=discord.Color.blurple()
+        )
+        for idx, opt in enumerate(self.options):
+            count = sum(1 for v in self.votes.values() if v == idx)
+            pct = int((count / total) * 100) if total > 0 else 0
+            bar = "🟩" * (pct // 10) + "⬜" * (10 - (pct // 10))
+            embed.add_field(
+                name=f"{['1️⃣', '2️⃣', '3️⃣', '4️⃣'][idx]} {opt}",
+                value=f"{bar} **{pct}%** ({count} vote{'s' if count > 1 else ''})",
+                inline=False
+            )
+        embed.set_footer(text=f"Total de participants : {total} • Clique sur un bouton pour voter")
+        return embed
+
+@bot.tree.command(name="sondage", description="Crée un sondage interactif avec graphiques de votes")
+@everywhere
+@app_commands.describe(
+    question="La question du sondage",
+    option1="Choix n°1",
+    option2="Choix n°2",
+    option3="Choix n°3 (optionnel)",
+    option4="Choix n°4 (optionnel)"
+)
+async def sondage(interaction: discord.Interaction, question: str, option1: str, option2: str, option3: str = None, option4: str = None):
+    opts = [option1, option2]
+    if option3: opts.append(option3)
+    if option4: opts.append(option4)
+    view = PollView(question, opts)
+    await interaction.response.send_message(embed=view.build_embed(), view=view)
+
+
+# ══════════════════════════════════════════════════════════════
+#  MINI-JEU MORPION (Tic-Tac-Toe avec 9 boutons) (/morpion)
+# ══════════════════════════════════════════════════════════════
+class TicTacToeButton(discord.ui.Button):
+    def __init__(self, x: int, y: int):
+        super().__init__(style=discord.ButtonStyle.secondary, label="\u200b", row=y)
+        self.x = x
+        self.y = y
+
+    async def callback(self, interaction: discord.Interaction):
+        assert self.view is not None
+        view: TicTacToeView = self.view
+        state = view.board[self.y][self.x]
+        if state != 0 or view.game_over:
+            return await interaction.response.defer()
+
+        if interaction.user != view.current_player:
+            return await interaction.response.send_message("❌ Ce n'est pas ton tour !", ephemeral=True)
+
+        # Coup joué
+        if view.current_player == view.player_x:
+            self.style = discord.ButtonStyle.danger
+            self.label = "X"
+            view.board[self.y][self.x] = 1
+            view.current_player = view.player_o
+        else:
+            self.style = discord.ButtonStyle.primary
+            self.label = "O"
+            view.board[self.y][self.x] = 2
+            view.current_player = view.player_x
+
+        self.disabled = True
+        winner = view.check_winner()
+
+        if winner:
+            view.game_over = True
+            for child in view.children:
+                child.disabled = True
+            winner_user = view.player_x if winner == 1 else view.player_o
+            embed = discord.Embed(
+                title="🏆 Victoire au Morpion !",
+                description=f"Félicitations à {winner_user.mention} qui remporte la partie !",
+                color=discord.Color.gold()
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+        elif view.is_full():
+            view.game_over = True
+            for child in view.children:
+                child.disabled = True
+            embed = discord.Embed(
+                title="🤝 Match nul !",
+                description="Égalité parfaite ! Bien joué aux deux joueurs.",
+                color=discord.Color.orange()
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+        else:
+            turn_str = "X" if view.current_player == view.player_x else "O"
+            embed = discord.Embed(
+                title="🎮 Morpion en cours",
+                description=f"Au tour de {view.current_player.mention} (**{turn_str}**)",
+                color=discord.Color.blue()
+            )
+            await interaction.response.edit_message(embed=embed, view=view)
+
+class TicTacToeView(discord.ui.View):
+    def __init__(self, player_x: discord.User, player_o: discord.User):
+        super().__init__(timeout=180)
+        self.player_x = player_x
+        self.player_o = player_o
+        self.current_player = player_x
+        self.game_over = False
+        self.board = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+
+        for y in range(3):
+            for x in range(3):
+                self.add_item(TicTacToeButton(x, y))
+
+    def check_winner(self):
+        # Lignes et colonnes
+        for i in range(3):
+            if self.board[i][0] == self.board[i][1] == self.board[i][2] != 0:
+                return self.board[i][0]
+            if self.board[0][i] == self.board[1][i] == self.board[2][i] != 0:
+                return self.board[0][i]
+        # Diagonales
+        if self.board[0][0] == self.board[1][1] == self.board[2][2] != 0:
+            return self.board[0][0]
+        if self.board[0][2] == self.board[1][1] == self.board[2][0] != 0:
+            return self.board[0][2]
+        return None
+
+    def is_full(self):
+        return all(self.board[y][x] != 0 for y in range(3) for x in range(3))
+
+@bot.tree.command(name="morpion", description="Défie un ami ou joue au Morpion dans le chat")
+@everywhere
+@app_commands.describe(adversaire="Le joueur que tu veux affronter (ou toi-même)")
+async def morpion(interaction: discord.Interaction, adversaire: discord.User = None):
+    p2 = adversaire or interaction.user
+    view = TicTacToeView(interaction.user, p2)
+    embed = discord.Embed(
+        title="🎮 Morpion — Partie lancée !",
+        description=f"**X :** {interaction.user.mention}\n**O :** {p2.mention}\n\n👉 C'est à {interaction.user.mention} de commencer (**X**) !",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+# ══════════════════════════════════════════════════════════════
+#  TRADUCTION PAR IA (/traduire)
+# ══════════════════════════════════════════════════════════════
+@bot.tree.command(name="traduire", description="Traduit n'importe quel texte dans la langue de ton choix")
+@everywhere
+@app_commands.describe(texte="Le texte à traduire", langue="La langue cible (ex: Anglais, Espagnol, Arabe, Japonais)")
+async def traduire(interaction: discord.Interaction, texte: str, langue: str):
+    await interaction.response.defer(thinking=True)
+    prompt = f"Traduis fidèlement et naturellement le texte suivant en {langue}. Ne donne QUE la traduction, sans intro ni commentaire :\n\n{texte}"
+    try:
+        trad = await ask_gemini(prompt)
+        embed = discord.Embed(title=f"🌍 Traduction ➜ {langue.capitalize()}", color=discord.Color.teal())
+        embed.add_field(name="Texte original", value=texte[:1000], inline=False)
+        embed.add_field(name="Traduction", value=trad[:1000], inline=False)
+        embed.set_footer(text="Traduit par Gemini 3.1 Flash-Lite")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur de traduction : `{e}`")
+
+
+# ══════════════════════════════════════════════════════════════
+#  PUNCHLINES & CITATIONS BATMAN (/batman)
+# ══════════════════════════════════════════════════════════════
+BATMAN_QUOTES = [
+    ("« Ce n'est pas qui je suis à l'intérieur, mais ce que je fais qui me définit. »", "Batman Begins"),
+    ("« Soit on meurt en héros, soit on vit assez longtemps pour se voir devenir le méchant. »", "The Dark Knight"),
+    ("« La nuit est plus sombre juste avant l'aube. Mais je vous le promets, l'aube se lèvera. »", "The Dark Knight"),
+    ("« Pourquoi tombons-nous, Bruce ? Pour mieux apprendre à nous relever. »", "Thomas Wayne"),
+    ("« Je suis la vengeance. Je suis la nuit. Je suis Batman ! »", "Batman: La Série Animée"),
+    ("« Un héros peut être n'importe qui. Même un homme faisant une chose aussi simple que poser un manteau sur les épaules d'un enfant. »", "The Dark Knight Rises"),
+    ("« Gotham a besoin de toi. Reste concentré et termine tes /todo. »", "Alfred Pennyworth")
+]
+
+@bot.tree.command(name="batman", description="Reçois une citation légendaire de Batman et Gotham")
+@everywhere
+async def batman_quote(interaction: discord.Interaction):
+    quote, src = random.choice(BATMAN_QUOTES)
+    embed = discord.Embed(
+        title="🦇 Conseil du Chevalier Noir",
+        description=f"### {quote}\n\n*— {src}*",
+        color=discord.Color.dark_theme()
+    )
+    embed.set_footer(text="Gardien de Gotham • Actif H24")
+    await interaction.response.send_message(embed=embed)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -176,7 +511,7 @@ async def ping(interaction: discord.Interaction):
     color = discord.Color.green() if latency < 150 else discord.Color.orange()
     embed = discord.Embed(
         title="🏓 Pong !",
-        description=f"**Latence :** `{latency} ms`\n**Statut :** {'🟢 Excellent' if latency < 150 else '🟡 Correct'}",
+        description=f"**Latence :** `{latency} ms`\n**Statut :** {'🟢 Parfait' if latency < 150 else '🟡 Bon'}",
         color=color
     )
     uptime = int((datetime.now(timezone.utc) - start_time).total_seconds())
@@ -186,7 +521,7 @@ async def ping(interaction: discord.Interaction):
 
 
 # ══════════════════════════════════════════════════════════════
-#  /rappel  —  Timer one-shot avec livraison en MP
+#  /rappel  —  Timer one-shot
 # ══════════════════════════════════════════════════════════════
 def parse_duration(s: str) -> int:
     s = s.strip().lower()
@@ -234,7 +569,7 @@ async def rappel(interaction: discord.Interaction, duree: str, message: str):
 # ══════════════════════════════════════════════════════════════
 #  /chrono  —  Pomodoro / minuteur
 # ══════════════════════════════════════════════════════════════
-@bot.tree.command(name="chrono", description="Lance un chrono Pomodoro (alerte en MP à la fin)")
+@bot.tree.command(name="chrono", description="Lance un chrono Pomodoro (alerte en MP)")
 @everywhere
 @app_commands.describe(duree="Durée : 25m, 1h, etc.", nom="Nom de la session (ex: Révisions)")
 async def chrono(interaction: discord.Interaction, duree: str, nom: str = "Session"):
@@ -253,7 +588,7 @@ async def chrono(interaction: discord.Interaction, duree: str, nom: str = "Sessi
         await asyncio.sleep(secs)
         embed_done = discord.Embed(
             title="✅ Temps écoulé !",
-            description=f"**{nom}** est terminé(e) ! Bien joué 🎉\nPense à faire une petite pause.",
+            description=f"**{nom}** est terminé(e) ! Bien joué 🎉\nPense à faire une pause.",
             color=discord.Color.green(),
             timestamp=datetime.now(timezone.utc)
         )
@@ -269,7 +604,7 @@ async def chrono(interaction: discord.Interaction, duree: str, nom: str = "Sessi
 
 
 # ══════════════════════════════════════════════════════════════
-#  /dice  —  Dé à N faces
+#  /dice  —  Dés
 # ══════════════════════════════════════════════════════════════
 @bot.tree.command(name="dice", description="Lance un dé à N faces")
 @everywhere
@@ -291,19 +626,18 @@ async def dice(interaction: discord.Interaction, faces: int = 6, nombre: int = 1
 
 
 # ══════════════════════════════════════════════════════════════
-#  /calcul  —  Calculatrice sécurisée
+#  /calcul  —  Calculatrice
 # ══════════════════════════════════════════════════════════════
 @bot.tree.command(name="calcul", description="Calculatrice avancée")
 @everywhere
 @app_commands.describe(expression="Ex : (3+5)*2, 2**10, sqrt(144)")
 async def calcul(interaction: discord.Interaction, expression: str):
-    import math
     allowed = set("0123456789+-*/().%, eE")
     safe_funcs = {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}
     safe_funcs["abs"] = abs; safe_funcs["round"] = round
     clean = expression.replace("^", "**").replace(",", ".")
     if any(c not in allowed and not c.isalpha() for c in clean):
-        return await interaction.response.send_message("❌ Expression non sécurisée.", ephemeral=True)
+        return await interaction.response.send_message("❌ Expression non autorisée.", ephemeral=True)
     try:
         result = eval(clean, {"__builtins__": {}}, safe_funcs)
         embed = discord.Embed(
@@ -317,7 +651,7 @@ async def calcul(interaction: discord.Interaction, expression: str):
 
 
 # ══════════════════════════════════════════════════════════════
-#  /meteo  —  Météo via Open-Meteo (sans clé API !)
+#  /meteo  —  Météo
 # ══════════════════════════════════════════════════════════════
 @bot.tree.command(name="meteo", description="Météo actuelle de n'importe quelle ville")
 @everywhere
@@ -326,7 +660,6 @@ async def meteo(interaction: discord.Interaction, ville: str):
     await interaction.response.defer(thinking=True)
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Géocodage
             geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={ville}&count=1&language=fr"
             async with session.get(geo_url) as r:
                 geo = await r.json()
@@ -336,7 +669,7 @@ async def meteo(interaction: discord.Interaction, ville: str):
             lat, lon = loc["latitude"], loc["longitude"]
             city_name = loc.get("name", ville)
             country   = loc.get("country", "")
-            # 2. Météo
+
             wx_url = (
                 f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
                 "&current=temperature_2m,apparent_temperature,weathercode,"
@@ -347,15 +680,15 @@ async def meteo(interaction: discord.Interaction, ville: str):
             cur = wx["current"]
             code = cur["weathercode"]
             ICONS = {
-                0:"☀️ Ciel dégagé", 1:"🌤️ Mostly clear", 2:"⛅ Partly cloudy", 3:"☁️ Couvert",
+                0:"☀️ Ciel dégagé", 1:"🌤️ Ensoleillé", 2:"⛅ Partiellement couvert", 3:"☁️ Couvert",
                 45:"🌫️ Brouillard", 48:"🌫️ Brouillard glacé",
                 51:"🌦️ Bruine légère", 53:"🌦️ Bruine", 55:"🌧️ Bruine dense",
                 61:"🌧️ Pluie légère", 63:"🌧️ Pluie", 65:"🌧️ Pluie forte",
                 71:"🌨️ Neige légère", 73:"❄️ Neige", 75:"❄️ Neige forte",
-                80:"🌧️ Averses", 81:"🌧️ Averses fortes", 82:"⛈️ Averses violentes",
-                95:"⛈️ Orage", 96:"⛈️ Orage avec grêle", 99:"⛈️ Orage violent"
+                80:"🌧️ Averses", 81:"🌧️ Fortes averses", 82:"⛈️ Averses violentes",
+                95:"⛈️ Orage", 96:"⛈️ Orage et grêle", 99:"⛈️ Orage violent"
             }
-            desc = ICONS.get(code, f"Code {code}")
+            desc = ICONS.get(code, f"Code météo {code}")
             embed = discord.Embed(
                 title=f"🌍 Météo — {city_name}, {country}",
                 description=f"**{desc}**",
@@ -365,14 +698,14 @@ async def meteo(interaction: discord.Interaction, ville: str):
             embed.add_field(name="🤔 Ressentie", value=f"`{cur['apparent_temperature']}°C`")
             embed.add_field(name="💧 Humidité", value=f"`{cur['relativehumidity_2m']}%`")
             embed.add_field(name="💨 Vent", value=f"`{cur['windspeed_10m']} km/h`")
-            embed.set_footer(text="Source : Open-Meteo • Données temps réel")
+            embed.set_footer(text="Source : Open-Meteo • Données en direct")
             await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur météo : `{e}`", ephemeral=True)
 
 
 # ══════════════════════════════════════════════════════════════
-#  /stats  —  Résumé de tes données
+#  /stats  —  Statistiques
 # ══════════════════════════════════════════════════════════════
 @bot.tree.command(name="stats", description="Résumé de tes activités Batman")
 @everywhere
@@ -396,19 +729,18 @@ async def stats(interaction: discord.Interaction):
 
 
 # ══════════════════════════════════════════════════════════════
-#  /todo  —  Tableau de bord interactif avec boutons et menus
+#  /todo  —  To-Do interactive
 # ══════════════════════════════════════════════════════════════
 def create_todo_embed(user_name: str, tasks: list) -> discord.Embed:
     embed = discord.Embed(title=f"📋 To-Do — {user_name}", color=discord.Color.blue())
     if not tasks:
-        embed.description = "🎉 **Aucune tâche !**\nClique sur **➕ Ajouter** pour en créer une."
+        embed.description = "🎉 **Aucune tâche en cours !**\nClique sur le bouton vert **➕ Ajouter** ci-dessous."
     else:
         lines = [f"`{i}.` {t['task']} *(le {t.get('date','')})*"
                  for i, t in enumerate(tasks, 1)]
         embed.description = "\n".join(lines)
-        embed.set_footer(text="Sélectionne une tâche dans le menu pour la cocher ✅")
+        embed.set_footer(text="Coche une tâche dans le menu déroulant ci-dessous ✅")
     return embed
-
 
 class AddTaskModal(discord.ui.Modal, title="➕ Nouvelle tâche"):
     task = discord.ui.TextInput(
@@ -430,7 +762,6 @@ class AddTaskModal(discord.ui.Modal, title="➕ Nouvelle tâche"):
             view=TodoView(self.uid, lst)
         )
 
-
 class EditTaskModal(discord.ui.Modal, title="✏️ Modifier une tâche"):
     new_text = discord.ui.TextInput(label="Nouveau texte", max_length=200)
 
@@ -449,7 +780,6 @@ class EditTaskModal(discord.ui.Modal, title="✏️ Modifier une tâche"):
             embed=create_todo_embed(interaction.user.display_name, lst),
             view=TodoView(self.uid, lst)
         )
-
 
 class TodoCheckSelect(discord.ui.Select):
     def __init__(self, uid: str, tasks: list):
@@ -474,7 +804,6 @@ class TodoCheckSelect(discord.ui.Select):
             view=TodoView(self.uid, lst)
         )
 
-
 class TodoEditSelect(discord.ui.Select):
     def __init__(self, uid: str, tasks: list):
         self.uid = uid
@@ -491,7 +820,6 @@ class TodoEditSelect(discord.ui.Select):
         todos = load_json(TODOS_FILE)
         lst = todos.get(self.uid, [])
         await interaction.response.send_modal(EditTaskModal(self.uid, idx, lst[idx]["task"]))
-
 
 class TodoView(discord.ui.View):
     def __init__(self, uid: str, tasks: list):
@@ -528,7 +856,6 @@ class TodoView(discord.ui.View):
             view=TodoView(self.uid, lst)
         )
 
-
 @bot.tree.command(name="todo", description="Ouvre ton tableau de bord de tâches interactif")
 @everywhere
 async def todo(interaction: discord.Interaction):
@@ -547,27 +874,14 @@ async def todo_ajouter(interaction: discord.Interaction, tache: str):
     todos[uid] = lst; save_json(TODOS_FILE, todos)
     await interaction.response.send_message(f"✅ Tâche ajoutée : **{tache}** ({len(lst)} total)", ephemeral=True)
 
-@bot.tree.command(name="todo_terminer", description="Supprime une tâche par son numéro")
-@everywhere
-@app_commands.describe(numero="Numéro de la tâche")
-async def todo_terminer(interaction: discord.Interaction, numero: int):
-    uid = str(interaction.user.id)
-    todos = load_json(TODOS_FILE)
-    lst = todos.get(uid, [])
-    if not lst or numero < 1 or numero > len(lst):
-        return await interaction.response.send_message("❌ Numéro invalide.", ephemeral=True)
-    done = lst.pop(numero - 1)
-    todos[uid] = lst; save_json(TODOS_FILE, todos)
-    await interaction.response.send_message(f"🎉 Terminée : ~~{done['task']}~~", ephemeral=True)
-
 
 # ══════════════════════════════════════════════════════════════
-#  /note  —  Notes interactives avec boutons
+#  /note  —  Notes interactives
 # ══════════════════════════════════════════════════════════════
 def create_notes_embed(user_name: str, notes: list) -> discord.Embed:
     embed = discord.Embed(title=f"📚 Notes — {user_name}", color=discord.Color.purple())
     if not notes:
-        embed.description = "📭 Aucune note.\nClique sur **➕ Nouvelle note** pour commencer."
+        embed.description = "📭 Aucune note.\nClique sur **➕ Nouvelle note** ci-dessous."
     else:
         for n in notes[-8:]:
             embed.add_field(
@@ -575,9 +889,8 @@ def create_notes_embed(user_name: str, notes: list) -> discord.Embed:
                 value=n['content'][:200] + ("…" if len(n['content']) > 200 else ""),
                 inline=False
             )
-        embed.set_footer(text=f"{len(notes)} note(s) au total • /note pour tout voir")
+        embed.set_footer(text=f"{len(notes)} note(s) au total • Utilise le menu pour en supprimer une")
     return embed
-
 
 class AddNoteModal(discord.ui.Modal, title="📝 Nouvelle note"):
     title_in = discord.ui.TextInput(label="Titre", max_length=100)
@@ -596,7 +909,6 @@ class AddNoteModal(discord.ui.Modal, title="📝 Nouvelle note"):
             embed=create_notes_embed(interaction.user.display_name, lst),
             view=NotesView(self.uid, lst)
         )
-
 
 class DeleteNoteSelect(discord.ui.Select):
     def __init__(self, uid: str, notes: list):
@@ -620,7 +932,6 @@ class DeleteNoteSelect(discord.ui.Select):
             view=NotesView(self.uid, lst)
         )
 
-
 class NotesView(discord.ui.View):
     def __init__(self, uid: str, notes: list):
         super().__init__(timeout=600)
@@ -641,7 +952,6 @@ class NotesView(discord.ui.View):
             embed=create_notes_embed(interaction.user.display_name, lst),
             view=NotesView(self.uid, lst)
         )
-
 
 @bot.tree.command(name="note", description="Ouvre ton tableau de bord de notes interactif")
 @everywhere
@@ -669,46 +979,13 @@ async def note_ajouter(interaction: discord.Interaction, titre: str, contenu: st
 @everywhere
 @app_commands.describe(question="Ta question, texte à résumer ou consigne")
 async def ia_command(interaction: discord.Interaction, question: str):
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_key:
-        return await interaction.response.send_message(
-            "💡 Active l'IA en ajoutant `GEMINI_API_KEY` sur Render.\n"
-            "Clé gratuite : https://aistudio.google.com/app/apikey", ephemeral=True)
     await interaction.response.defer(thinking=True)
     try:
-        from google import genai
-        client = genai.Client(api_key=gemini_key)
-        
-        # Liste de modèles du plus fluide / disponible au secours
-        models_to_try = [
-            "gemini-3.1-flash-lite",
-            "gemini-3.5-flash-lite",
-            "gemini-3.8-flash"
-        ]
-        
-        answer = None
-        used_model = None
-        last_error = None
-
-        for m in models_to_try:
-            try:
-                resp = client.models.generate_content(model=m, contents=question)
-                if resp.text:
-                    answer = resp.text
-                    used_model = m
-                    break
-            except Exception as err:
-                last_error = err
-                continue
-
-        if not answer:
-            raise last_error or Exception("Impossible d'obtenir une réponse de l'IA.")
-
+        answer = await ask_gemini(question)
         if len(answer) > 1900:
             answer = answer[:1900] + "… *(suite tronquée)*"
-
         embed = discord.Embed(title="🧠 Réponse IA", description=answer, color=discord.Color.teal())
-        embed.set_footer(text=f"Q: {question[:80]} • Modèle: {used_model}")
+        embed.set_footer(text=f"Q: {question[:80]} • Propulsé par Gemini")
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
