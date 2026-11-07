@@ -172,6 +172,57 @@ async def on_message(message: discord.Message):
         except Exception:
             pass
 
+    # 4. Discussion naturelle en Message Privé (MP avec Batman) ou par mention (@Batman)
+    is_dm = message.guild is None
+    is_mentioned = (bot.user in message.mentions) if bot.user else False
+
+    if (is_dm or is_mentioned) and content and not content.startswith(("/", "!", ".")):
+        clean_text = content
+        if is_mentioned and bot.user:
+            clean_text = clean_text.replace(f"<@{bot.user.id}>", "").replace(f"<@!{bot.user.id}>", "").strip()
+
+        if clean_text:
+            img_bytes = None
+            mime = "image/png"
+            if message.attachments:
+                att = message.attachments[0]
+                if any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]):
+                    try:
+                        img_bytes = await att.read()
+                        mime = att.content_type or "image/png"
+                    except Exception:
+                        pass
+
+            try:
+                async with message.channel.typing():
+                    history = get_user_memory(uid)
+                    system_prompt = (
+                        f"Tu es Batman, l'assistant loyal et protecteur de {message.author.display_name}. "
+                        "Tu t'exprimes avec l'assurance, la vivacité et la bienveillance du Chevalier Noir : "
+                        "voix calme, percutante, légèrement mystérieuse, hyper efficace et toujours prêt à aider."
+                    )
+                    reply_text = await ask_gemini(
+                        prompt=clean_text,
+                        image_bytes=img_bytes,
+                        mime_type=mime,
+                        history=history,
+                        system_instruction=system_prompt
+                    )
+                    append_user_memory(uid, clean_text, reply_text)
+
+                    if len(reply_text) <= 2000:
+                        await message.reply(reply_text)
+                    else:
+                        for chunk in [reply_text[i:i+1950] for i in range(0, len(reply_text), 1950)]:
+                            await message.channel.send(chunk)
+                    return
+            except Exception as e:
+                try:
+                    await message.reply(f"🦇 *(Batman)* Une interférence radio a perturbé ma liaison : `{e}`")
+                except Exception:
+                    pass
+                return
+
     await bot.process_commands(message)
 
 # ══════════════════════════════════════════════════════════════
