@@ -4,6 +4,8 @@ import asyncio
 import re
 import random
 import math
+import io
+import urllib.parse
 from datetime import datetime, timezone
 import aiohttp
 from aiohttp import web
@@ -101,26 +103,81 @@ def everywhere(cmd):
     return cmd
 
 # ══════════════════════════════════════════════════════════════
-#  HELPER GEMINI AVEC FALLBACK INTELLIGENT
+#  HELPERS IA : GEMINI (VISION & TEXTE) + GÉNÉRATION D'IMAGES
 # ══════════════════════════════════════════════════════════════
-async def ask_gemini(prompt: str) -> str:
+async def ask_gemini(prompt: str, image_bytes: bytes = None, mime_type: str = "image/png") -> str:
     key = os.getenv("GEMINI_API_KEY")
     if not key:
-        return "⚠️ Clé GEMINI_API_KEY manquante."
-    
+        return "⚠️ Clé GEMINI_API_KEY manquante dans les variables d'environnement."
+
     from google import genai
+    from google.genai import types
+
     client = genai.Client(api_key=key)
-    models = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
+    models = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash"
+    ]
+
+    contents = []
+    if image_bytes:
+        clean_mime = mime_type.split(";")[0].strip() if mime_type else "image/png"
+        contents.append(types.Part.from_bytes(data=image_bytes, mime_type=clean_mime))
+    contents.append(prompt)
+
     last_err = None
     for m in models:
         try:
-            resp = client.models.generate_content(model=m, contents=prompt)
+            resp = await client.aio.models.generate_content(model=m, contents=contents)
             if resp.text:
                 return resp.text.strip()
         except Exception as e:
             last_err = e
             continue
     raise last_err or Exception("Aucun modèle Gemini n'a pu répondre.")
+
+
+async def generate_ai_image(prompt: str, style_modifier: str = "Naturel") -> tuple[bytes, str]:
+    """
+    Génère une image originale par IA.
+    1. Tente d'abord Google GenAI Imagen 3 si GEMINI_API_KEY est configurée.
+    2. Si non configurée ou en cas d'erreur de quota/accès, bascule automatiquement sur Pollinations Flux (gratuit, ultra rapide et sans clé).
+    """
+    enhanced_prompt = prompt
+    if style_modifier and style_modifier != "Naturel":
+        enhanced_prompt = f"{prompt}, {style_modifier}"
+
+    key = os.getenv("GEMINI_API_KEY")
+    # Tentative 1 : Google GenAI Imagen 3
+    if key:
+        try:
+            from google import genai
+            client = genai.Client(api_key=key)
+            resp = await client.aio.models.generate_images(
+                model="imagen-3.0-generate-002",
+                prompt=enhanced_prompt,
+                config=dict(number_of_images=1, output_mime_type="image/png")
+            )
+            if resp.generated_images and resp.generated_images[0].image:
+                return resp.generated_images[0].image.image_bytes, "Google Imagen 3"
+        except Exception as e:
+            print(f"⚠️ Imagen 3 indisponible ({e}), bascule automatique sur Pollinations Flux...", flush=True)
+
+    # Tentative 2 : Moteur Pollinations Flux HD (Garantie de service 24h/24)
+    encoded = urllib.parse.quote(enhanced_prompt)
+    seed = random.randint(1000, 9999999)
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}&model=flux"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=45)) as r:
+            if r.status == 200:
+                data = await r.read()
+                if len(data) > 1000:
+                    return data, "Pollinations Flux"
+    raise Exception("Impossible de contacter le service de génération d'image pour le moment.")
 
 # ══════════════════════════════════════════════════════════════
 #  /aide  —  Menu d'aide complet avec pagination
@@ -159,12 +216,14 @@ HELP_PAGES = [
         ]
     },
     {
-        "title": "🦇 Batman — Page 4/4 : IA & Clic-Droit Magique",
+        "title": "🦇 Batman — Page 4/4 : IA, Vision & Images",
         "color": discord.Color.teal(),
         "fields": [
-            ("🧠 /ia", "`question` — Questionne Gemini 3.1 Flash-Lite (résumés, code, idées).", False),
+            ("🧠 /ia", "`question` + `[image]` — Questionne Gemini ou fais analyser une photo/capture.", False),
+            ("🎨 /image", "`description` + `[style]` — Génère une image IA en haute définition.", False),
+            ("✨ /imagine", "`prompt` — Raccourci rapide pour générer une image artistique.", False),
             ("🌍 /traduire", "`texte` + `langue` — Traduction instantanée ultra-naturelle avec l'IA.", False),
-            ("🖱️ Clic Droit Message ➜ Apps", "• **🧠 Résumer avec Batman** : Résume n'importe quel message en 1 clic.\n• **📝 Sauvegarder en note** : Enregistre un message directement dans tes notes !", False),
+            ("🖱️ Clic Droit Message ➜ Apps", "• **🧠 Résumer avec Batman** : Résume n'importe quel message en 1 clic.\n• **🔍 Analyser l'image (IA)** : Analyse une image postée.\n• **📝 Sauvegarder en note** : Enregistre un message directement dans tes notes !", False),
             ("🖱️ Clic Droit Profil ➜ Apps", "• **🦇 Profil & Avatar HD** : Affiche l'avatar en pleine résolution et les infos de compte.", False),
         ]
     }
@@ -283,6 +342,66 @@ async def context_user_info(interaction: discord.Interaction, user: discord.User
     view = discord.ui.View()
     view.add_item(discord.ui.Button(label="Télécharger Avatar HD", url=avatar_url, emoji="🖼️"))
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# 4. Clic droit sur un message -> Analyser l'image avec l'IA
+@bot.tree.context_menu(name="🔍 Analyser l'image (IA)")
+@everywhere
+async def context_analyze_image(interaction: discord.Interaction, message: discord.Message):
+    image_url = None
+    mime_type = "image/png"
+    img_bytes = None
+
+    # Pièces jointes du message
+    for att in message.attachments:
+        ct = att.content_type or ""
+        if ct.startswith("image/"):
+            img_bytes = await att.read()
+            mime_type = ct
+            image_url = att.url
+            break
+        elif any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]):
+            img_bytes = await att.read()
+            mime_type = "image/jpeg" if att.filename.lower().endswith((".jpg", ".jpeg")) else "image/png"
+            image_url = att.url
+            break
+
+    # Embeds d'image
+    if not img_bytes and message.embeds:
+        for emb in message.embeds:
+            if emb.image and emb.image.url:
+                image_url = emb.image.url
+                break
+            elif emb.thumbnail and emb.thumbnail.url:
+                image_url = emb.thumbnail.url
+                break
+        if image_url:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image_url) as resp:
+                    if resp.status == 200:
+                        img_bytes = await resp.read()
+                        mime_type = resp.headers.get("Content-Type", "image/png")
+
+    if not img_bytes:
+        return await interaction.response.send_message("❌ Aucune image trouvée dans ce message à faire analyser.", ephemeral=True)
+
+    await interaction.response.defer(thinking=True)
+    prompt = "Décris et analyse cette image avec précision et clarté en français. Explique ce qu'elle montre, ses détails notables et son contexte."
+    try:
+        analysis = await ask_gemini(prompt, image_bytes=img_bytes, mime_type=mime_type)
+        if len(analysis) > 1900:
+            analysis = analysis[:1900] + "… *(suite tronquée)*"
+        embed = discord.Embed(
+            title="🔍 Analyse d'image par l'IA",
+            description=analysis,
+            color=discord.Color.teal()
+        )
+        if image_url:
+            embed.set_thumbnail(url=image_url)
+        embed.set_footer(text=f"Image de {message.author.display_name} • Propulsé par Gemini Vision")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -973,20 +1092,110 @@ async def note_ajouter(interaction: discord.Interaction, titre: str, contenu: st
 
 
 # ══════════════════════════════════════════════════════════════
-#  /ia  —  Assistant IA Gemini (avec fallback automatique)
+#  /ia  —  Assistant IA Gemini (Texte & Vision Multimodale)
 # ══════════════════════════════════════════════════════════════
-@bot.tree.command(name="ia", description="Pose une question à l'IA")
+@bot.tree.command(name="ia", description="Pose une question à l'IA ou fais analyser une image")
 @everywhere
-@app_commands.describe(question="Ta question, texte à résumer ou consigne")
-async def ia_command(interaction: discord.Interaction, question: str):
+@app_commands.describe(
+    question="Ta question, texte à résumer ou consigne d'analyse",
+    image="Image optionnelle à envoyer pour analyse (PNG, JPG, WEBP...)"
+)
+async def ia_command(
+    interaction: discord.Interaction,
+    question: str,
+    image: discord.Attachment = None
+):
     await interaction.response.defer(thinking=True)
     try:
-        answer = await ask_gemini(question)
+        img_bytes = None
+        mime_type = "image/png"
+        if image is not None:
+            ct = image.content_type or ""
+            is_image = ct.startswith("image/") or any(
+                image.filename.lower().endswith(ext)
+                for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+            )
+            if not is_image:
+                return await interaction.followup.send("❌ Le fichier fourni doit être une image valide (PNG, JPG, WEBP, GIF).")
+            img_bytes = await image.read()
+            mime_type = ct if ct.startswith("image/") else "image/png"
+
+        answer = await ask_gemini(question, image_bytes=img_bytes, mime_type=mime_type)
         if len(answer) > 1900:
             answer = answer[:1900] + "… *(suite tronquée)*"
         embed = discord.Embed(title="🧠 Réponse IA", description=answer, color=discord.Color.teal())
-        embed.set_footer(text=f"Q: {question[:80]} • Propulsé par Gemini")
+        if image is not None:
+            embed.set_thumbnail(url=image.url)
+        footer = f"Q: {question[:75]}"
+        if image is not None:
+            footer += " 📸 (avec image)"
+        footer += " • Propulsé par Gemini"
+        embed.set_footer(text=footer)
         await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
+
+
+# ══════════════════════════════════════════════════════════════
+#  /image & /imagine  —  Génération d'images par IA
+# ══════════════════════════════════════════════════════════════
+IMAGE_STYLES = [
+    app_commands.Choice(name="🎨 Standard / Naturel", value="Naturel"),
+    app_commands.Choice(name="📸 Photoréaliste", value="photorealistic, 8k photography, highly detailed, sharp focus"),
+    app_commands.Choice(name="🦇 Batman / Gotham Dark", value="dark gothic style, Batman comics noir, moody dramatic shadows, cinematic rain"),
+    app_commands.Choice(name="🏮 Anime / Manga", value="anime aesthetic, Makoto Shinkai style, vibrant colors, detailed line art"),
+    app_commands.Choice(name="⚡ Cyberpunk", value="cyberpunk city, neon lights, futuristic, rainy night, synthwave"),
+    app_commands.Choice(name="🖌️ Peinture à l'huile", value="oil painting on canvas, expressive brush strokes, classical art"),
+    app_commands.Choice(name="🕹️ Pixel Art", value="pixel art 32-bit, retro gaming aesthetic")
+]
+
+@bot.tree.command(name="image", description="Génère une image originale par intelligence artificielle")
+@everywhere
+@app_commands.describe(
+    description="Ce que tu veux voir sur l'image (ex: Batman contemplant Gotham sous la pluie)",
+    style="Style artistique optionnel pour l'image"
+)
+@app_commands.choices(style=IMAGE_STYLES)
+async def image_command(
+    interaction: discord.Interaction,
+    description: str,
+    style: app_commands.Choice[str] = None
+):
+    await interaction.response.defer(thinking=True)
+    try:
+        chosen_style = style.value if style else "Naturel"
+        style_label = style.name if style else "Standard"
+        img_bytes, engine = await generate_ai_image(description, chosen_style)
+
+        file = discord.File(io.BytesIO(img_bytes), filename="batman_art.png")
+        embed = discord.Embed(
+            title="🎨 Image générée par l'IA",
+            description=f"**Prompt :** {description}\n**Style :** {style_label}",
+            color=discord.Color.dark_theme()
+        )
+        embed.set_image(url="attachment://batman_art.png")
+        embed.set_footer(text=f"Demandé par {interaction.user.display_name} • Moteur : {engine}")
+        await interaction.followup.send(embed=embed, file=file)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur lors de la génération de l'image : `{e}`")
+
+
+@bot.tree.command(name="imagine", description="Génère une image artistique par IA (alias de /image)")
+@everywhere
+@app_commands.describe(prompt="Description de l'image à imaginer")
+async def imagine_command(interaction: discord.Interaction, prompt: str):
+    await interaction.response.defer(thinking=True)
+    try:
+        img_bytes, engine = await generate_ai_image(prompt, "Naturel")
+        file = discord.File(io.BytesIO(img_bytes), filename="imagine_art.png")
+        embed = discord.Embed(
+            title="✨ Imagination IA",
+            description=f"> {prompt}",
+            color=discord.Color.purple()
+        )
+        embed.set_image(url="attachment://imagine_art.png")
+        embed.set_footer(text=f"Demandé par {interaction.user.display_name} • Moteur : {engine}")
+        await interaction.followup.send(embed=embed, file=file)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`")
 

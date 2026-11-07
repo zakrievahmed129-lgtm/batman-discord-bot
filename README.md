@@ -6,6 +6,7 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 
 ### 🖱️ Menus Clic-Droit (Apps Discord)
 * **🧠 Résumer avec Batman** : Fais un clic droit sur n'importe quel message pour en obtenir un résumé clair via l'IA !
+* **🔍 Analyser l'image (IA)** : Clic droit sur n'importe quel message contenant une image pour en obtenir une analyse détaillée par Gemini Vision !
 * **📝 Sauvegarder en note** : Clic droit sur un message pour l'enregistrer instantanément dans ton carnet personnel.
 * **🦇 Profil & Avatar HD** : Clic droit sur un membre pour voir sa date de création et télécharger son avatar en haute définition.
 
@@ -20,8 +21,10 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 * /rappel : Minuteur avec alerte automatique en message privé (MP).
 * /chrono : Minuteur de travail Pomodoro.
 
-### 🧠 Intelligence Artificielle & Outils
-* /ia question : Pose tes questions à Gemini avec système de bascule automatique anti-panne.
+### 🧠 Intelligence Artificielle & Création Visuelle
+* /ia question [image] : Pose tes questions à Gemini ou fais-lui analyser une photo/capture jointe avec système anti-panne multimodèle.
+* /image description [style] : Génère une image originale en haute définition via l'IA (choix de styles : Photoréaliste, Batman Noir, Anime, Cyberpunk...).
+* /imagine prompt : Raccourci rapide pour générer une illustration artistique par IA.
 * /traduire texte + langue : Traduction instantanée ultra-naturelle dans toutes les langues.
 * /meteo ville : Météo en direct sans clé d'API.
 * /calcul expression : Calculatrice scientifique complète.
