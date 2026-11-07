@@ -30,6 +30,7 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 * /scanner_mon_style [nombre] : Scanne automatiquement tes messages récents dans le salon pour apprendre ta vraie façon d'écrire sans rien copier-coller !
 * /mon_style [preset] [description] : Enregistre ou fais analyser par l'IA tes tics de langage et ta façon de parler pour les réponses automatiques.
 * /reponds_pour_moi message [intention] : Génère 3 réponses parfaites (dans ton style, piquante ou diplomate) prêtes à envoyer.
+* /repondre_discussion [nb_messages] [intention] : Lit tout le fil récent de la discussion dans le salon pour te proposer une réponse parfaitement dans le contexte !
 * /reformuler texte style : Réécris n'importe quel texte ou brouillon (Professionnel, Clash sans pitié, Batman Noir, Diplomate, Humoristique...).
 * /repartie sujet [intensite] : Génère 3 punchlines et réparties immédiates pour clouer le bec sans vulgarité.
 * /afk [raison] : Active ton mode absence ; Batman prévient automatiquement ceux qui te mentionnent et t'accueille à ton retour.
@@ -42,6 +43,21 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 
 ### 🔄 Statut Rotatif & H24
 Le bot alterne automatiquement ses statuts toutes les 5 minutes (Roblox, Gotham, /aide, /todo) et reste éveillé 24h/24 grâce à son serveur web interne !
+
+---
+
+## 🚀 Déploiement Facile (H24 Gratuit sur Render)
+
+1. Crée un nouveau **Web Service** sur [Render.com](https://render.com) en connectant ce dépôt GitHub.
+2. Configure les paramètres suivants :
+   * **Runtime** : `Python 3`
+   * **Build Command** : `pip install -r requirements.txt`
+   * **Start Command** : `python main.py`
+3. Ajoute tes variables secrètes dans l'onglet **Environment** :
+   * `DISCORD_TOKEN` : Ton token de bot Discord
+   * `GEMINI_API_KEY` : Ta clé d'API Google AI Studio (gratuite)
+   * `PORT` : `8080` (automatique sur Render)
+4. Déploie ! Ton bot Batman sera en ligne 24h/24 avec toutes ses commandes synchronisées.
 
 ---
 

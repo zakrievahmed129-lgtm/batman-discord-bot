@@ -422,6 +422,7 @@ HELP_PAGES = [
             ("🎨 /mon_style", "`[preset]` + `[description]` — Configure ton style d'écriture pour les réponses auto.", False),
             ("🔍 /scanner_mon_style", "Scanne automatiquement tes messages récents pour apprendre ton style !", False),
             ("💬 /reponds_pour_moi", "`message` + `[intention]` — Génère 3 réponses calibrées selon ton style.", False),
+            ("🗨️ /repondre_discussion", "Lit les derniers messages du salon et propose la réponse idéale !", False),
             ("✍️ /reformuler", "`texte` + `style` — Reformule une phrase (Pro, Clash, Batman, Diplomate...).", False),
             ("⚡ /repartie", "`sujet` + `[intensite]` — Génère des réparties et punchlines légendaires.", False),
         ]
@@ -692,14 +693,42 @@ async def context_reply_for_me(interaction: discord.Interaction, message: discor
     user_style = get_user_style_description(uid)
     style_label = get_user_style_label(uid)
 
-    prompt = f"""Tu es un ghostwriter Discord expert. L'utilisateur veut répondre à ce message reçu de {message.author.display_name} :
+    # Récupération automatique du fil de discussion précédant le message
+    convo_lines = []
+    user_samples_in_convo = []
+    if hasattr(interaction.channel, "history"):
+        try:
+            async for m in interaction.channel.history(limit=8, before=message.created_at):
+                txt = m.clean_content or m.content
+                if txt and not txt.startswith(("/", "!", ".")):
+                    convo_lines.append(f"{m.author.display_name}: {txt}")
+                    if m.author.id == interaction.user.id and len(txt) > 3:
+                        user_samples_in_convo.append(txt)
+            convo_lines.reverse()
+        except Exception:
+            pass
+
+    convo_lines.append(f"{message.author.display_name}: {content}")
+    convo_context = "\n".join(convo_lines)
+
+    prompt = f"""Tu es un ghostwriter Discord d'élite pour {interaction.user.display_name}.
+Voici le fil de la discussion dans le salon pour bien comprendre le sujet et l'ambiance :
+--- HISTORIQUE DE LA CONVERSATION ---
+{convo_context}
+--- FIN DE L'HISTORIQUE ---
+
+Le dernier message auquel {interaction.user.display_name} doit répondre est celui de {message.author.display_name} :
 « {content} »
 
-Voici le style de langage habituel de l'utilisateur :
+Voici le style habituel de {interaction.user.display_name} :
 {user_style}
+"""
+    if user_samples_in_convo:
+        prompt += f"\nDans cette discussion même, {interaction.user.display_name} a déjà écrit ceci :\n" + "\n".join(f"- « {s} »" for s in user_samples_in_convo[-4:])
 
-Génère 3 propositions de réponses prêtes à l'envoi, adaptées au contexte de la conversation :
-1. Dans son style personnel (imitation très fidèle des tics de langage, vocabulaire et ton)
+    prompt += """
+Génère 3 propositions de réponses prêtes à l'envoi, parfaitement cohérentes avec toute la discussion :
+1. Dans son style personnel (imitation très fidèle de sa façon d'écrire, son argot, sa ponctuation et son humeur)
 2. Piquante & Drôle (avec de l'esprit, du second degré ou une répartie)
 3. Diplomate & Efficace (courte, bienveillante et claire)
 
@@ -725,15 +754,22 @@ RÉPONDS EXACTEMENT AU FORMAT :
             opt2 = "Pas mal, mais je préfère passer mon tour !"
             opt3 = "Message bien reçu, je reviens vers toi rapidement !"
 
+        desc = ""
+        if len(convo_lines) > 1:
+            desc += f"📖 *Discussion analysée ({len(convo_lines)} messages)*\n"
+        desc += (
+            f"En réponse à **{message.author.display_name}** :\n> *« {content[:140]}... »*\n\n"
+            f"**🎯 Option 1 (Ton style : {style_label}) :**\n```\n{opt1}\n```\n"
+            f"**⚡ Option 2 (Piquante / Drôle) :**\n```\n{opt2}\n```\n"
+            f"**🤝 Option 3 (Diplomate / Bref) :**\n```\n{opt3}\n```"
+        )
+
         embed = discord.Embed(
             title="💬 Propositions de réponses prêtes à l'emploi",
-            description=f"En réponse à **{message.author.display_name}** :\n> *« {content[:150]}... »*\n\n"
-                        f"**🎯 Option 1 (Ton style : {style_label}) :**\n```\n{opt1}\n```\n"
-                        f"**⚡ Option 2 (Piquante / Drôle) :**\n```\n{opt2}\n```\n"
-                        f"**🤝 Option 3 (Diplomate / Bref) :**\n```\n{opt3}\n```",
+            description=desc,
             color=discord.Color.teal()
         )
-        embed.set_footer(text="Discret (visible uniquement par toi) • Clique pour envoyer ou copie directement.")
+        embed.set_footer(text="Discret (visible uniquement par toi) • Copie l'option de ton choix !")
         view = GhostwriterView(message, interaction.user.id, opt1, opt2, opt3)
         await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     except Exception as e:
@@ -749,12 +785,30 @@ async def context_analyze_tone(interaction: discord.Interaction, message: discor
         return await interaction.response.send_message("❌ Ce message ne contient pas de texte.", ephemeral=True)
 
     await interaction.response.defer(ephemeral=True, thinking=True)
+
+    # Récupérer le contexte récent pour mieux comprendre le ton
+    convo_lines = []
+    if hasattr(interaction.channel, "history"):
+        try:
+            async for m in interaction.channel.history(limit=6, before=message.created_at):
+                txt = m.clean_content or m.content
+                if txt and not txt.startswith(("/", "!", ".")):
+                    convo_lines.append(f"{m.author.display_name}: {txt}")
+            convo_lines.reverse()
+        except Exception:
+            pass
+    convo_lines.append(f"{message.author.display_name}: {content}")
+    convo_context = "\n".join(convo_lines)
+
     prompt = f"""Fais une analyse psychologique fine de ce message Discord envoyé par {message.author.display_name} :
 « {content} »
 
+Voici le contexte récent de la discussion pour t'aider à évaluer le ton réel :
+{convo_context}
+
 Donne :
 1. 🎭 **Ton émotionnel dominant** (ex: Passif-agressif, Ironique, Taquin, Flirteur, Sérieux, Énervé, etc.)
-2. 🔍 **Sous-entendus & Non-dits** (ce que la personne pense probablement sans le dire ouvertement)
+2. 🔍 **Sous-entendus & Non-dits** (ce que la personne pense probablement sans le dire ouvertement compte tenu de la discussion)
 3. 💡 **Conseil stratégique** (comment réagir intelligemment sans créer de drama ou pour reprendre l'avantage)
 
 Reste concis, clair et direct."""
@@ -766,7 +820,7 @@ Reste concis, clair et direct."""
             description=f"> *« {content[:200]} »*\n\n{analysis[:1800]}",
             color=discord.Color.purple()
         )
-        embed.set_footer(text="Analyse psychologique discrète générée par Batman IA")
+        embed.set_footer(text=f"Analyse contextuelle ({len(convo_lines)} messages pris en compte) par Batman IA")
         await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
@@ -1777,6 +1831,101 @@ FORMAT EXACT :
                         f"**🎯 Option 1 (Ton style : {style_label}) :**\n```\n{opt1}\n```\n"
                         f"**⚡ Option 2 (Piquante / Drôle) :**\n```\n{opt2}\n```\n"
                         f"**🤝 Option 3 (Diplomate / Bref) :**\n```\n{opt3}\n```",
+            color=discord.Color.teal()
+        )
+        embed.set_footer(text=f"Intention : {intent_text} • Copie l'option de ton choix !")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
+
+
+@bot.tree.command(name="repondre_discussion", description="Lit les derniers messages du salon et te propose la réponse parfaite")
+@everywhere
+@app_commands.describe(
+    intention="Quelle intention veux-tu donner à ta réponse ?",
+    nb_messages="Nombre de messages récents à analyser dans ce salon (défaut: 10)"
+)
+@app_commands.choices(intention=REPLY_INTENTIONS)
+async def repondre_discussion(
+    interaction: discord.Interaction,
+    intention: app_commands.Choice[str] = None,
+    nb_messages: int = 10
+):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    limit = max(5, min(nb_messages, 25))
+    uid = str(interaction.user.id)
+    user_style = get_user_style_description(uid)
+    style_label = get_user_style_label(uid)
+    intent_text = intention.value if intention else "S'intégrer naturellement dans la discussion"
+
+    convo_lines = []
+    user_samples = []
+    last_author = "la discussion"
+    if hasattr(interaction.channel, "history"):
+        try:
+            async for m in interaction.channel.history(limit=limit):
+                txt = m.clean_content or m.content
+                if txt and not txt.startswith(("/", "!", ".")):
+                    convo_lines.append(f"{m.author.display_name}: {txt}")
+                    if m.author.id == interaction.user.id and len(txt) > 3:
+                        user_samples.append(txt)
+            convo_lines.reverse()
+            if convo_lines:
+                last_author = convo_lines[-1].split(":")[0]
+        except Exception as e:
+            return await interaction.followup.send(f"⚠️ Impossible de lire l'historique du salon : `{e}`", ephemeral=True)
+
+    if not convo_lines:
+        return await interaction.followup.send("❌ Aucun message récent trouvé dans ce salon à analyser.", ephemeral=True)
+
+    convo_text = "\n".join(convo_lines)
+    prompt = f"""Tu es un ghostwriter Discord d'élite pour {interaction.user.display_name}.
+Voici la discussion récente dans le salon :
+--- HISTORIQUE DU CHAT ---
+{convo_text}
+--- FIN DU CHAT ---
+
+Intention souhaitée : {intent_text}
+Style habituel de {interaction.user.display_name} :
+{user_style}
+"""
+    if user_samples:
+        prompt += f"\nDans cette discussion, {interaction.user.display_name} a déjà écrit ceci :\n" + "\n".join(f"- « {s} »" for s in user_samples[-4:])
+
+    prompt += """
+Génère 3 propositions de réponses pour que l'utilisateur relance ou réponde à la conversation de façon ultra-fluide :
+1. Dans son style personnel (respectant fidèlement sa manière d'écrire, son argot, sa ponctuation et son humeur)
+2. Piquante & Drôle (avec de l'esprit, du second degré ou une bonne répartie)
+3. Diplomate & Fluide (naturelle, claire et conviviale)
+
+RÉPONDS EXACTEMENT AU FORMAT :
+===OPT1===
+(texte de l'option 1 uniquement)
+===OPT2===
+(texte de l'option 2 uniquement)
+===OPT3===
+(texte de l'option 3 uniquement)"""
+
+    try:
+        raw = await ask_gemini(prompt)
+        opt1, opt2, opt3 = "", "", ""
+        if "===OPT1===" in raw and "===OPT2===" in raw and "===OPT3===" in raw:
+            parts = raw.split("===OPT1===")[1].split("===OPT2===")
+            opt1 = parts[0].strip()
+            parts2 = parts[1].split("===OPT3===")
+            opt2 = parts2[0].strip()
+            opt3 = parts2[1].strip()
+        else:
+            opt1 = raw[:300].strip()
+            opt2 = "Totalement d'accord avec vous !"
+            opt3 = "Franchement bien vu !"
+
+        embed = discord.Embed(
+            title="💬 Réponses générées à partir du fil de discussion",
+            description=f"Analyse de **{len(convo_lines)} messages** du salon (dernier intervenant : **{last_author}**)\n\n"
+                        f"**🎯 Option 1 (Ton style : {style_label}) :**\n```\n{opt1}\n```\n"
+                        f"**⚡ Option 2 (Piquante / Drôle) :**\n```\n{opt2}\n```\n"
+                        f"**🤝 Option 3 (Diplomate / Fluide) :**\n```\n{opt3}\n```",
             color=discord.Color.teal()
         )
         embed.set_footer(text=f"Intention : {intent_text} • Copie l'option de ton choix !")
