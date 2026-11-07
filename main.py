@@ -42,9 +42,7 @@ def save_json(fp, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 intents = discord.Intents.default()
-# intents.message_content est intentionnellement laissé à False pour éviter
-# le crash PrivilegedIntentsRequired au déploiement (Render / hébergement).
-# Toutes les commandes slash et menus contextuels fonctionnent à 100% sans ce privilège !
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 start_time = datetime.now(timezone.utc)
 
@@ -1828,7 +1826,13 @@ async def main():
         print("❌ DISCORD_TOKEN manquant dans .env !", flush=True); return
     await start_web_server()
     async with bot:
-        await bot.start(TOKEN)
+        try:
+            await bot.start(TOKEN)
+        except discord.errors.PrivilegedIntentsRequired:
+            print("⚠️ Message Content Intent non activé dans le Developer Portal.", flush=True)
+            print("🔄 Bascule automatique sur les intents standards sans privilège...", flush=True)
+            bot._connection._intents = discord.Intents.default()
+            await bot.connect()
 
 if __name__ == "__main__":
     try:
