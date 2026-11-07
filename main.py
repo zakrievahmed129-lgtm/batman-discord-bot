@@ -42,6 +42,7 @@ def save_json(fp, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 start_time = datetime.now(timezone.utc)
 
@@ -97,6 +98,27 @@ async def on_ready():
     if not rotate_presence.is_running():
         rotate_presence.start()
 
+# ─────────────────── GESTIONNAIRE D'ERREURS GLOBAL ─────────────
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.CommandOnCooldown):
+        msg = f"⏳ Doucement ! Réessaie dans `{error.retry_after:.1f}` secondes."
+    elif isinstance(error, app_commands.MissingPermissions):
+        msg = "❌ Tu n'as pas les permissions requises pour exécuter cette commande."
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        msg = "❌ Le bot n'a pas les permissions nécessaires sur ce serveur."
+    else:
+        msg = f"⚠️ Une erreur est survenue : `{error}`"
+
+    embed = discord.Embed(title="🦇 Batman — Erreur", description=msg, color=discord.Color.red())
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception:
+        pass
+
 # ─────────────────────── ON MESSAGE (AFK) ─────────────────────
 @bot.event
 async def on_message(message: discord.Message):
@@ -135,6 +157,20 @@ async def on_message(message: discord.Message):
                     await message.channel.send(embed=embed_afk, delete_after=12)
                 except Exception:
                     pass
+
+    # 3. Apprentissage automatique discret du style de langage de l'auteur
+    content = message.clean_content or message.content
+    if content and len(content) > 3 and not content.startswith(("/", "!", ".")):
+        try:
+            styles = load_json(STYLES_FILE)
+            u_style = styles.get(uid, {"label": "Apprentissage continu", "rules": DEFAULT_STYLE, "recent_messages": []})
+            recent = u_style.get("recent_messages", [])
+            recent.append(content[:250])
+            u_style["recent_messages"] = recent[-20:] # garde les 20 derniers messages réels
+            styles[uid] = u_style
+            save_json(STYLES_FILE, styles)
+        except Exception:
+            pass
 
     await bot.process_commands(message)
 
@@ -256,7 +292,13 @@ PRESET_STYLES = {
 def get_user_style_description(uid: str) -> str:
     styles = load_json(STYLES_FILE)
     if uid in styles:
-        return styles[uid].get("rules", DEFAULT_STYLE)
+        u_data = styles[uid]
+        rules = u_data.get("rules", DEFAULT_STYLE)
+        recent = u_data.get("recent_messages", [])
+        if recent:
+            samples_str = "\n".join(f"- « {m} »" for m in recent[-12:])
+            return f"Règles stylistiques :\n{rules}\n\nExemples récents de ses vrais messages dans le chat (à imiter fidèlement) :\n{samples_str}"
+        return rules
     return DEFAULT_STYLE
 
 def get_user_style_label(uid: str) -> str:
@@ -265,12 +307,14 @@ def get_user_style_label(uid: str) -> str:
         return styles[uid].get("label", "Personnalisé")
     return "Standard (Défaut)"
 
-def set_user_style(uid: str, label: str, rules: str, samples: str = ""):
+def set_user_style(uid: str, label: str, rules: str, samples: str = "", recent_messages: list = None):
     styles = load_json(STYLES_FILE)
+    existing = styles.get(uid, {})
     styles[uid] = {
         "label": label,
         "rules": rules,
         "samples": samples,
+        "recent_messages": recent_messages if recent_messages is not None else existing.get("recent_messages", []),
         "updated": datetime.now().strftime("%d/%m/%Y %H:%M")
     }
     save_json(STYLES_FILE, styles)
@@ -376,6 +420,7 @@ HELP_PAGES = [
             ("💭 /ia_memoire", "Consulte ce que l'IA a en mémoire sur tes conversations passées.", False),
             ("🧹 /ia_reset", "Efface l'historique de discussion pour repartir sur une conversation neuve.", False),
             ("🎨 /mon_style", "`[preset]` + `[description]` — Configure ton style d'écriture pour les réponses auto.", False),
+            ("🔍 /scanner_mon_style", "Scanne automatiquement tes messages récents pour apprendre ton style !", False),
             ("💬 /reponds_pour_moi", "`message` + `[intention]` — Génère 3 réponses calibrées selon ton style.", False),
             ("✍️ /reformuler", "`texte` + `style` — Reformule une phrase (Pro, Clash, Batman, Diplomate...).", False),
             ("⚡ /repartie", "`sujet` + `[intensite]` — Génère des réparties et punchlines légendaires.", False),
@@ -1510,6 +1555,7 @@ async def ia_reset(interaction: discord.Interaction):
 #  CLONE DE STYLE & RÉPONDRE À MA PLACE (/mon_style & /reponds)
 # ══════════════════════════════════════════════════════════════
 STYLE_CHOICES = [
+    app_commands.Choice(name="🔍 Scanner mes messages du salon (Auto)", value="scan"),
     app_commands.Choice(name="🤙 Familier & Argot urbain", value="familier"),
     app_commands.Choice(name="🤝 Cool & Amical", value="cool"),
     app_commands.Choice(name="💼 Professionnel & Courtois", value="pro"),
@@ -1517,6 +1563,61 @@ STYLE_CHOICES = [
     app_commands.Choice(name="⚡ Sarcastique & Piquant", value="sarcasme"),
     app_commands.Choice(name="✍️ Personnalisé (via description)", value="custom")
 ]
+
+@bot.tree.command(name="scanner_mon_style", description="Scanne automatiquement tes messages dans le salon pour apprendre ton style")
+@everywhere
+@app_commands.describe(messages_a_scanner="Nombre de messages à inspecter dans ce salon (ex: 50, 100, 200)")
+async def scanner_mon_style(interaction: discord.Interaction, messages_a_scanner: int = 100):
+    await interaction.response.defer(thinking=True)
+    limit = max(20, min(messages_a_scanner, 250))
+    uid = str(interaction.user.id)
+
+    samples = []
+    try:
+        async for msg in interaction.channel.history(limit=limit):
+            if msg.author.id == interaction.user.id:
+                txt = msg.clean_content or msg.content
+                if txt and len(txt.strip()) > 3 and not txt.startswith(("/", "!", ".")):
+                    samples.append(txt.strip())
+    except Exception as e:
+        return await interaction.followup.send(f"⚠️ Impossible de lire l'historique du salon : `{e}`")
+
+    if len(samples) < 3:
+        return await interaction.followup.send(
+            f"❌ Je n'ai trouvé que **{len(samples)} message(s)** de toi dans les {limit} derniers messages de ce salon.\n"
+            f"Écris quelques messages normaux dans ce salon puis relance, ou augmente la limite (ex: `/scanner_mon_style 200`) !"
+        )
+
+    formatted_samples = "\n".join(f"• « {s} »" for s in samples[:35])
+    analysis_prompt = (
+        f"Tu es un expert linguiste et profileur de style. Voici un échantillon de {len(samples)} messages réels "
+        f"écrits par l'utilisateur Discord {interaction.user.display_name} :\n\n{formatted_samples}\n\n"
+        "Analyse précisément sa façon de communiquer :\n"
+        "- Niveau de langage (argot, familiarité, formalisme, expressions récurrentes)\n"
+        "- Ponctuation, majuscules/minuscules et utilisation des emojis\n"
+        "- Longueur et structure des phrases\n\n"
+        "Rédige une synthèse de 3 règles d'or concrètes pour que l'IA puisse cloner fidèlement ce style."
+    )
+
+    try:
+        analyzed_rules = await ask_gemini(analysis_prompt)
+        set_user_style(uid, "🧠 Profil scanné en direct", analyzed_rules, samples="\n".join(samples[:15]), recent_messages=samples[:25])
+
+        embed = discord.Embed(
+            title="🧠 Ton style a été scanné et appris avec succès !",
+            description=f"J'ai analysé **{len(samples)} de tes messages** dans ce salon pour comprendre exactement comment tu parles !\n\n"
+                        f"**Ce que j'ai appris de ton style :**\n{analyzed_rules}",
+            color=discord.Color.green()
+        )
+        embed.add_field(
+            name="💡 Exemples récents retenus",
+            value="\n".join(f"> *« {s[:65]}... »*" for s in samples[:3]),
+            inline=False
+        )
+        embed.set_footer(text="Désormais, /reponds_pour_moi et le clic-droit imitent automatiquement tes vraies habitudes !")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"⚠️ Erreur lors de l'analyse IA : `{e}`")
 
 @bot.tree.command(name="mon_style", description="Configure ou fais analyser ton style d'écriture par l'IA")
 @everywhere
@@ -1532,6 +1633,9 @@ async def mon_style(
 ):
     uid = str(interaction.user.id)
     chosen_key = preset.value
+
+    if chosen_key == "scan":
+        return await scanner_mon_style.callback(interaction, 100)
 
     if chosen_key in PRESET_STYLES and not description:
         info = PRESET_STYLES[chosen_key]
