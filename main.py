@@ -158,19 +158,10 @@ async def on_message(message: discord.Message):
                 except Exception:
                     pass
 
-    # 3. Apprentissage automatique discret du style de langage de l'auteur
+    # 3. Apprentissage automatique discret du style & de l'humour de l'auteur
     content = message.clean_content or message.content
-    if content and len(content) > 3 and not content.startswith(("/", "!", ".")):
-        try:
-            styles = load_json(STYLES_FILE)
-            u_style = styles.get(uid, {"label": "Apprentissage continu", "rules": DEFAULT_STYLE, "recent_messages": []})
-            recent = u_style.get("recent_messages", [])
-            recent.append(content[:250])
-            u_style["recent_messages"] = recent[-20:] # garde les 20 derniers messages réels
-            styles[uid] = u_style
-            save_json(STYLES_FILE, styles)
-        except Exception:
-            pass
+    if content and record_user_writing(uid, content, is_chat=True):
+        maybe_schedule_humor_dna(uid)
 
     # 4. Discussion naturelle en Message Privé (MP avec Batman) ou par mention (@Batman)
     is_dm = message.guild is None
@@ -188,6 +179,34 @@ async def on_message(message: discord.Message):
         if message.attachments:
             try:
                 file_bytes, mime, extra_file_text, kind_label = await extract_attachment_payload(message.attachments[0])
+            except Exception:
+                pass
+
+        # Calibrage naturel en MP : si l'utilisateur décrit son humour ou envoie un screen de ses messages
+        lower_t = clean_text.lower()
+        calibration_triggers = (
+            "apprends mon humour", "mon humour c'est", "mon humour est", "voici mon humour",
+            "voila mon humour", "voilà mon humour", "imite mon humour", "copie mon humour",
+            "apprends mon style", "voici mon style", "voila mon style", "voilà mon style",
+            "imite mon style", "copie mon style", "voici comment je parle", "voila comment je parle",
+            "voilà comment je parle", "calibre mon humour"
+        )
+        if is_dm and any(trig in lower_t for trig in calibration_triggers):
+            try:
+                async with message.channel.typing():
+                    dna = await analyze_and_save_humor_dna(
+                        uid=uid,
+                        explicit_notes=clean_text,
+                        extra_image_bytes=file_bytes if (file_bytes and kind_label and "Image" in kind_label) else None,
+                        extra_mime=mime or "image/png"
+                    )
+                    if dna:
+                        await message.reply(
+                            f"✅ C'est noté et mémorisé pour `💬 Répondre à ma place`, `/reformuler` et `/repartie` :\n\n{dna[:1600]}"
+                        )
+                    else:
+                        await message.reply("✅ J'ai bien enregistré ton style et ton humour !")
+                    return
             except Exception:
                 pass
 
@@ -373,60 +392,252 @@ def reset_user_memory(uid: str):
         save_json(MEMORY_FILE, mem)
 
 
-# ─────────────── GESTION DU STYLE DE LANGAGE ──────────────────
-DEFAULT_STYLE = "Naturel, décontracté, tutoiement amical, phrases claires, emojis légers"
+# ─────────────── GESTION DU STYLE, HUMOUR & ANTI-IA ─────────────
+OLD_DEFAULT_STYLE = "Naturel, décontracté, tutoiement amical, phrases claires, emojis légers"
+DEFAULT_STYLE = (
+    "100% humain façon vrai message Discord/SMS : zéro emoji, zéro smiley, minuscules naturelles, "
+    "pas de ponctuation scolaire ni de point final rigide, messages courts et directs, "
+    "humour second degré / pince-sans-rire / taquin naturel sans jamais forcer ni sonner comme une IA"
+)
+
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"
+    "\u2600-\u27BF"
+    "\u231A-\u231B"
+    "\u23E9-\u23FA"
+    "\u25AA-\u25FE"
+    "\u2934-\u2935"
+    "\u2B05-\u2B55"
+    "\u203C\u2049\u2139\u2194-\u21AA\u24C2"
+    "\uFE0E\uFE0F\u200D\u20E3"
+    "]+",
+    flags=re.UNICODE
+)
+_EMOTICON_RE = re.compile(r"(?<!\S)(?:[:;][-']?[)D(PpOo]|<3|\^\^)(?!\S)")
+
+def strip_emojis(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = _EMOJI_RE.sub("", text)
+    cleaned = _EMOTICON_RE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+def clean_human_discord_reply(text: str, allow_emojis: bool = False, strip_trailing_dot: bool = True) -> str:
+    if not text:
+        return ""
+    s = text.strip().replace("```", "").strip("`«»\"")
+    s = re.sub(r"^(?:option\s*\d+|réponse\s*\d+|r\d+)\s*[:\-–]\s*", "", s, flags=re.IGNORECASE).strip()
+    s = s.strip("«»\"")
+    if not allow_emojis:
+        s = strip_emojis(s)
+    # Remplace les tirets cadratins trop "IA" par un espacement simple si besoin
+    s = s.replace(" — ", " - ").replace("—", "-")
+    if strip_trailing_dot and s.endswith(".") and not s.endswith(("..", "...")):
+        # Garde le point seulement s'il y a plusieurs phrases ou si c'est long
+        if len(s) < 130 and s.count(".") == 1:
+            s = s[:-1].rstrip()
+    return s.strip()
 
 PRESET_STYLES = {
     "familier": {
-        "label": "🤙 Familier & Argot urbain",
-        "rules": "Argot moderne (wesh, frérot, mdrr, chaud, tranquille, sah, bg), phrases courtes, minuscules, direct, détendu."
+        "label": "Familier & Discord",
+        "rules": "Naturel, langage courant/familier crédible, phrases courtes, minuscules, direct, détendu, zéro emoji."
     },
     "cool": {
-        "label": "🤝 Cool & Amical",
-        "rules": "Chaleureux, bienveillant, tutoiement spontané, emojis sympas, positif et amical."
+        "label": "Naturel & Posé",
+        "rules": "Décontracté, tutoiement spontané, simple, posé, zéro emoji et zéro phrase robotique."
     },
     "pro": {
-        "label": "💼 Professionnel & Courtois",
-        "rules": "Poli, soigné, sans fautes, vouvoiement/tutoiement courtois, précis, bien articulé et orienté solution."
+        "label": "Pro & Poli",
+        "rules": "Poli, soigné, sans fautes, courtois, clair, sans emojis."
     },
     "batman": {
-        "label": "🦇 Batman / Chevalier Noir",
-        "rules": "Sombre, laconique, percutant, voix grave, direct, aucune fioriture inutile."
+        "label": "Batman / Laconique",
+        "rules": "Sombre, laconique, froid et percutant, aucune fioriture, zéro emoji."
     },
     "sarcasme": {
-        "label": "⚡ Sarcastique & Piquant",
-        "rules": "Second degré aiguisé, ironique, répartie affûtée, taquin et incisif sans vulgarité."
+        "label": "Pince-sans-rire & Second degré",
+        "rules": "Humour sec, second degré pince-sans-rire, taquin et incisif sans lourdeur ni emojis."
     }
 }
 
+_humor_tasks_inflight: set[str] = set()
+
+def record_user_writing(uid: str, text: str, is_chat: bool = True) -> bool:
+    """Enregistre discrètement un vrai message ou brouillon de l'utilisateur pour imiter son humour et son ton."""
+    if not text:
+        return False
+    clean = text.strip()
+    if len(clean) < 3 or len(clean) > 220 or clean.startswith(("/", "!", ".")):
+        return False
+    if clean.startswith(("http://", "https://")) and " " not in clean:
+        return False
+    try:
+        styles = load_json(STYLES_FILE)
+        u_style = styles.get(uid, {
+            "label": "Apprentissage auto",
+            "rules": DEFAULT_STYLE,
+            "recent_messages": [],
+            "intent_hints": []
+        })
+        if u_style.get("rules") == OLD_DEFAULT_STYLE:
+            u_style["rules"] = DEFAULT_STYLE
+        field = "recent_messages" if is_chat else "intent_hints"
+        limit = 35 if is_chat else 15
+        lst = u_style.get(field, [])
+        if clean not in lst:
+            lst.append(clean)
+            u_style[field] = lst[-limit:]
+            u_style["updated"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+            styles[uid] = u_style
+            save_json(STYLES_FILE, styles)
+            return True
+    except Exception:
+        pass
+    return False
+
+async def analyze_and_save_humor_dna(
+    uid: str,
+    explicit_notes: str = None,
+    explicit_examples: list[str] = None,
+    extra_image_bytes: bytes = None,
+    extra_mime: str = "image/png"
+) -> str:
+    """Analyse automatiquement les messages/exemples pour extraire l'ADN exact d'humour et d'écriture de l'utilisateur."""
+    _humor_tasks_inflight.add(uid)
+    try:
+        styles = load_json(STYLES_FILE)
+        u_style = styles.get(uid, {
+            "label": "Apprentissage auto",
+            "rules": DEFAULT_STYLE,
+            "recent_messages": [],
+            "intent_hints": []
+        })
+        if explicit_notes is not None and explicit_notes.strip():
+            u_style["humor_notes"] = explicit_notes.strip()[:400]
+            u_style["label"] = "Ton humour calibré"
+        if explicit_examples:
+            recent = u_style.get("recent_messages", [])
+            for ex in explicit_examples:
+                ex_c = ex.strip()
+                if ex_c and ex_c not in recent:
+                    recent.append(ex_c[:220])
+            u_style["recent_messages"] = recent[-35:]
+            u_style["label"] = "Ton humour calibré"
+
+        recent_msgs = u_style.get("recent_messages", [])
+        hints = u_style.get("intent_hints", [])
+        notes = u_style.get("humor_notes", "")
+
+        if not recent_msgs and not hints and not notes and not extra_image_bytes:
+            save_json(STYLES_FILE, styles)
+            return ""
+
+        prompt_parts = [
+            "Tu es un linguiste spécialisé dans les conversations Discord/SMS réelles.",
+            "Analyse les données ci-dessous appartenant à un utilisateur pour dresser sa fiche d'IMITATION PARFAITE (surtout son humour, son second degré et son écriture réelle) :",
+        ]
+        if notes:
+            prompt_parts.append(f"\nComment il décrit lui-même son humour/style :\n« {notes} »")
+        if recent_msgs:
+            prompt_parts.append("\nSes vrais messages récents :\n" + "\n".join(f"- {m}" for m in recent_msgs[-25:]))
+        if hints:
+            prompt_parts.append("\nAutres tournures/intentions qu'il a tapées :\n" + "\n".join(f"- {h}" for h in hints[-10:]))
+        if extra_image_bytes:
+            prompt_parts.append("\n(Une capture d'écran de ses messages est jointe : lis uniquement SES bulles/messages pour capter son humour, son argot, ses abréviations et sa ponctuation.)")
+
+        prompt_parts.append(
+            "\nRédige une fiche de consignes ULTRA PRÉCISE en 5 points courts (max 900 caractères au total) :\n"
+            "1. Type d'humour exact (ex: pince-sans-rire, taquin, absurde, autodérision, sarcasme sec... avec le genre de vannes qu'il fait)\n"
+            "2. Vocabulaire / tics / abréviations qu'il utilise vraiment (sans en inventer d'autres)\n"
+            "3. Casse & ponctuation exacte (minuscules ? pas de points ? virgules ?)\n"
+            "4. Longueur typique des messages\n"
+            "5. Rappel emojis/fioritures (par défaut : ZERO emoji)"
+        )
+
+        dna = await ask_gemini(
+            "\n".join(prompt_parts),
+            image_bytes=extra_image_bytes,
+            mime_type=extra_mime
+        )
+        u_style["humor_dna"] = dna.strip()[:1000]
+        u_style["dna_sample_count"] = len(recent_msgs) + len(hints)
+        u_style["updated"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+        styles[uid] = u_style
+        save_json(STYLES_FILE, styles)
+        return u_style["humor_dna"]
+    except Exception:
+        return ""
+    finally:
+        _humor_tasks_inflight.discard(uid)
+
+def maybe_schedule_humor_dna(uid: str):
+    if uid in _humor_tasks_inflight:
+        return
+    try:
+        styles = load_json(STYLES_FILE)
+        u_style = styles.get(uid)
+        if not u_style:
+            return
+        total = len(u_style.get("recent_messages", [])) + len(u_style.get("intent_hints", []))
+        last_cnt = u_style.get("dna_sample_count", 0)
+        if total >= 4 and (not u_style.get("humor_dna") or total - last_cnt >= 4):
+            asyncio.create_task(analyze_and_save_humor_dna(uid))
+    except Exception:
+        pass
+
 def get_user_style_description(uid: str) -> str:
+    env_preset = os.getenv("PERSONAL_HUMOR_PROFILE", "").strip()
     styles = load_json(STYLES_FILE)
+    parts = []
+    if env_preset:
+        parts.append(f"Profil permanent configuré :\n{env_preset}")
     if uid in styles:
         u_data = styles[uid]
         rules = u_data.get("rules", DEFAULT_STYLE)
+        if rules == OLD_DEFAULT_STYLE:
+            rules = DEFAULT_STYLE
+        notes = u_data.get("humor_notes", "")
+        dna = u_data.get("humor_dna", "")
         recent = u_data.get("recent_messages", [])
+        hints = u_data.get("intent_hints", [])
+        if notes:
+            parts.append(f"Humour & consignes de l'utilisateur :\n{notes}")
+        if dna:
+            parts.append(f"ADN Humour & Écriture analysé :\n{dna}")
+        else:
+            parts.append(f"Base stylistique :\n{rules}")
         if recent:
-            samples_str = "\n".join(f"- « {m} »" for m in recent[-12:])
-            return f"Règles stylistiques :\n{rules}\n\nExemples récents de ses vrais messages dans le chat (à imiter fidèlement) :\n{samples_str}"
-        return rules
-    return DEFAULT_STYLE
+            samples_str = "\n".join(f"- {m}" for m in recent[-15:])
+            parts.append(f"Vrais messages récents à imiter (ton, humour, taille, orthographe) :\n{samples_str}")
+        elif hints:
+            hints_str = "\n".join(f"- {h}" for h in hints[-8:])
+            parts.append(f"Tournures récentes de l'utilisateur :\n{hints_str}")
+    if not parts:
+        return DEFAULT_STYLE
+    return "\n\n".join(parts)
 
 def get_user_style_label(uid: str) -> str:
     styles = load_json(STYLES_FILE)
     if uid in styles:
-        return styles[uid].get("label", "Personnalisé")
-    return "Standard (Défaut)"
+        if styles[uid].get("humor_dna") or styles[uid].get("humor_notes"):
+            return "Ton humour"
+        return styles[uid].get("label", "Naturel")
+    return "Naturel"
 
 def set_user_style(uid: str, label: str, rules: str, samples: str = "", recent_messages: list = None):
     styles = load_json(STYLES_FILE)
     existing = styles.get(uid, {})
-    styles[uid] = {
-        "label": label,
-        "rules": rules,
-        "samples": samples,
-        "recent_messages": recent_messages if recent_messages is not None else existing.get("recent_messages", []),
-        "updated": datetime.now().strftime("%d/%m/%Y %H:%M")
-    }
+    existing["label"] = label
+    existing["rules"] = rules
+    existing["samples"] = samples
+    if recent_messages is not None:
+        existing["recent_messages"] = recent_messages
+    existing["updated"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+    styles[uid] = existing
     save_json(STYLES_FILE, styles)
 
 
@@ -504,7 +715,7 @@ HELP_PAGES = [
         "title": "🦇 Batman — Page 2/4 : Super-Pouvoirs Clic-Droit (100% Furtifs)",
         "color": discord.Color.teal(),
         "fields": [
-            ("💬 Répondre à ma place", "Lit la discussion (texte, **vocal** ou **image**), imite ton style (même en langue étrangère !) avec studio interactif : `📱 Mode SMS`, `✍️ Guider`, `🔥 Piquant` & copie 1-clic.", False),
+            ("💬 Répondre à ma place", "Lit la discussion (texte, **vocal** ou **image**), écrit sans emojis ni ton IA en imitant **ton humour** : `🎯 + Humour`, `🎭 Mon humour`, `✍️ Guider`, `🔥 Piquant` & copie 1-clic.", False),
             ("🧠 Résumer avec Batman", "**Écoute les messages vocaux en cachette**, lit les PDF/fichiers, résume les longs pavés ou rattrape la discussion manquée !", False),
             ("🎭 Analyser ton & sous-entendus", "Décode l'ironie, les excuses/mythos, l'intérêt caché (même à la voix !) + bouton pour générer 3 réponses.", False),
             ("🔍 Analyser l'image (IA)", "Analyse furtive : résout un **devoir/exo en photo**, lit le texte (OCR) ou explique un mème.", False),
@@ -518,8 +729,8 @@ HELP_PAGES = [
             ("🧠 /ia", "`question` + `[fichier]` + `[prive]` — Gemini + **Recherche Google en direct** + lecture Image, Vocal, PDF & Code (furtif par défaut !).", False),
             ("🕵️ /verifier", "`affirmation` — **Détecteur de mytho & Fact-Check Google en direct** avec preuves et réponse prête à copier !", False),
             ("🎨 /image & ✨ /imagine", "Génère des images IA Haute Définition (ratios 1:1, 16:9, 9:16 + régénération).", False),
-            ("✍️ /reformuler", "`texte` + `style` — Réécrit ton brouillon (SMS naturel, Pro, Clash, Sans fautes...) en privé.", False),
-            ("⚡ /repartie", "`sujet` + `[intensite]` — Génère 3 punchlines cinglantes en mode furtif.", False),
+            ("✍️ /reformuler", "`texte` + `style` — Réécrit ton brouillon (Discord naturel, Humour, Pro, Clash, Zéro faute...) sans emojis.", False),
+            ("⚡ /repartie", "`sujet` + `[intensite]` — Génère 3 réparties naturelles qui collent à ton humour, sans emojis.", False),
             ("🌍 /traduire", "`texte` + `langue` — Traduction instantanée ultra-naturelle.", False),
         ]
     },
@@ -607,8 +818,6 @@ async def generate_ghostwriter_card(
 ) -> tuple[discord.Embed, str, str, str]:
     """Analyse le message cible (texte, vocal ou image) + la discussion et génère l'embed et les 3 réponses."""
     uid = str(user.id)
-    user_style = get_user_style_description(uid)
-    style_label = get_user_style_label(uid)
 
     content = message.clean_content or message.content or ""
     media_bytes = None
@@ -629,83 +838,87 @@ async def generate_ghostwriter_card(
     if not content and not media_bytes:
         raise ValueError("Ce message ne contient ni texte, ni vocal, ni image exploitable.")
 
-    # Récupération automatique du fil de discussion précédant le message
+    # Récupération automatique du fil de discussion (scan jusqu'à 45 msgs pour capturer les vrais tics & blagues du user)
     convo_lines = []
     user_samples_in_convo = []
     if hasattr(channel, "history"):
         try:
-            async for m in channel.history(limit=8, before=message.created_at):
+            raw_msgs = []
+            async for m in channel.history(limit=45, before=message.created_at):
                 txt = m.clean_content or m.content
                 if txt and not txt.startswith(("/", "!", ".")):
-                    convo_lines.append(f"{m.author.display_name}: {txt}")
-                    if m.author.id == user.id and len(txt) > 3:
-                        user_samples_in_convo.append(txt)
-            convo_lines.reverse()
+                    raw_msgs.append((m.author.id, m.author.display_name, txt))
+            raw_msgs.reverse()
+            for a_id, a_name, txt in raw_msgs[-12:]:
+                convo_lines.append(f"{a_name}: {txt}")
+            for a_id, _, txt in raw_msgs:
+                if a_id == user.id and 3 <= len(txt) <= 220:
+                    user_samples_in_convo.append(txt)
+                    record_user_writing(uid, txt, is_chat=True)
         except Exception:
             pass
 
-    # Apprentissage automatique passif des vraies expressions de l'utilisateur
     if user_samples_in_convo:
-        try:
-            styles = load_json(STYLES_FILE)
-            u_style = styles.get(uid, {"label": "Apprentissage continu", "rules": DEFAULT_STYLE, "recent_messages": []})
-            recent = u_style.get("recent_messages", [])
-            for s in user_samples_in_convo:
-                if s not in recent:
-                    recent.append(s[:250])
-            u_style["recent_messages"] = recent[-30:]
-            styles[uid] = u_style
-            save_json(STYLES_FILE, styles)
-            user_style = get_user_style_description(uid)
-        except Exception:
-            pass
+        maybe_schedule_humor_dna(uid)
+
+    user_style = get_user_style_description(uid)
+    style_label = get_user_style_label(uid)
 
     target_desc = content if content else f"[{media_label} envoyé par {message.author.display_name}]"
     convo_lines.append(f"{message.author.display_name}: {target_desc}")
     convo_context = "\n".join(convo_lines)
 
-    prompt = f"""Tu es le ghostwriter Discord personnel et ultra-réaliste de {user.display_name}.
-Voici le fil de la discussion pour comprendre le sujet, la relation et l'ambiance :
---- HISTORIQUE DE LA CONVERSATION ---
-{convo_context}
---- FIN DE L'HISTORIQUE ---
+    prompt = f"""Tu es le double numérique exact de {user.display_name} sur Discord. Tu dois rédiger 3 vraies réponses comme si {user.display_name} les avait tapées lui-même sur son clavier/téléphone.
 
-Dernier message reçu de {message.author.display_name} auquel {user.display_name} veut répondre :
+--- HISTORIQUE RÉCENT DU CHAT ---
+{convo_context}
+--- FIN ---
+
+Dernier message de {message.author.display_name} auquel il faut répondre :
 « {target_desc} »
 """
     if media_bytes and media_label:
-        prompt += f"\n(Un média de type {media_label} est joint : écoute/regarde son contenu pour y répondre de façon ultra pertinente !)\n"
+        prompt += f"\n(Média joint : {media_label} — écoute/regarde son contenu pour réagir précisément dessus.)\n"
 
     prompt += f"""
-Profil de style de {user.display_name} :
+=== PROFIL, HUMOUR & STYLE DE {user.display_name.upper()} ===
 {user_style}
 """
     if user_samples_in_convo:
-        prompt += f"\nExemples directs de {user.display_name} dans cette conversation :\n" + "\n".join(f"- « {s} »" for s in user_samples_in_convo[-4:]) + "\n"
+        prompt += f"\nSes derniers messages directs dans ce salon (copie exactement cette énergie, cette orthographe et cet humour) :\n" + "\n".join(f"- {s}" for s in user_samples_in_convo[-6:]) + "\n"
 
     if custom_instruction:
-        prompt += f"\n⚡ CONSIGNE SPÉCIALE PRIORITAIRE DE {user.display_name.upper()} :\n{custom_instruction}\n"
+        prompt += f"\nCONSIGNE PRIORITAIRE : {custom_instruction}\n"
 
     prompt += """
-RÈGLES D'OR ANTI-ROBOT :
-- Écris comme un VRAI humain sur Discord, JAMAIS comme une IA trop polie ou scolaire !
-- Évite les phrases à rallonge, les points d'exclamation forcés ou le ton "service client".
-- Si le message de l'interlocuteur est dans une langue étrangère (anglais, espagnol, arabe, etc.), écris les 3 options DANS CETTE MÊME LANGUE ÉTRANGÈRE (naturelle/familière), et indique dans ===INFO=== la traduction française du message reçu + le sens des réponses. Sinon laisse ===INFO=== vide (ou résume le vocal en 1 phrase si c'était un vocal).
+INTERDICTIONS ABSOLUES (SI TU VIOLES UNE SEULE DE CES RÈGLES, ÇA SONNE IA) :
+1. ZÉRO ÉMOJI / SMILEY : AUCUN emoji Unicode (interdiction totale de 😂 🤣 😅 🔥 👍 💀 😎 ❤️ 🙏 etc.), AUCUN smiley (:), :D, ^^, <3). Du texte pur à 100%.
+2. ZÉRO TON IA / SCOLAIRE :
+   - Interdiction d'écrire proprement comme un bot ou un mail ("Je suis sur mon PC, tranquille. Et toi, tu fais quoi ?", "Carrément !", "Pas de souci !", "Avec plaisir !", "Super !", "Bien vu !", "Haha c'est énorme !", "Franchement j'avoue !").
+   - Écris comme un vrai gars sur Discord : généralement en minuscules (sauf si le profil met des majuscules), SANS point final, sans virgule académique, sans espace devant ? ou !, sans guillemets, sans tiret cadratin (—).
+   - Pas de question de politesse forcée à la fin genre "et toi tu fais quoi ?" si ce n'est pas naturel dans le contexte.
+3. LONGUEUR ADAPTÉE : Si l'autre envoie 4 mots, réponds en 3 à 9 mots max. Ne fais jamais de pavé.
+4. HUMOUR RÉEL (PAS D'HUMOUR DE ROBOT) :
+   - Imite l'humour exact du profil ci-dessus (ou s'il n'y en a pas encore, fais du second degré sec / pince-sans-rire / taquin léger entre potes, jamais des blagues lourdes style "en train de sauver le monde hahaha").
+   - Contraste concret à respecter :
+     * INTERDIT (IA) : "Je suis sur mon PC, tranquille ! Et toi ? 😄"
+     * ATTENDU (HUMAIN) : "sur le pc la trkl" / "je fixe mon ecran en attendant un miracle" / "rien de fou sur le pc"
+5. LANGUE : Réponds dans la langue du message reçu. S'il est dans une langue étrangère, résume/traduis brièvement en français dans ===INFO=== et garde les 3 options dans la langue de la conv (sans emojis).
 
-Génère 3 propositions de réponses prêtes à copier-coller :
-1. Ton style naturel (fluide, crédible à 100%, comme si tu l'avais tapé toi-même)
-2. Piquante / Drôle (avec de l'esprit, du second degré ou une bonne répartie)
-3. Courte / Directe (réponse rapide style vrai message Discord de quelques mots)
+Génère exactement 3 options distinctes :
+1. ===OPT1=== Naturel (exactement comment l'utilisateur répondrait normalement, crédible à 100%, zéro emoji)
+2. ===OPT2=== Avec son humour (vanne pince-sans-rire / second degré / taquin fidèle à son humour, zéro emoji, pas forcé)
+3. ===OPT3=== Express (réponse rapide 1 à 6 mots style téléphone, zéro emoji)
 
-RÉPONDS EXACTEMENT AU FORMAT SUIVANT (sans guillemets autour des options) :
+FORMAT STRICT (rien d'autre autour) :
 ===INFO===
-(vide si texte français simple, sinon résumé 1 ligne du vocal/image ou traduction FR si langue étrangère)
+(vide si français classique, sinon résumé 1 ligne du vocal/image ou traduction FR)
 ===OPT1===
-(texte pur de l'option 1 uniquement)
+(texte pur option 1)
 ===OPT2===
-(texte pur de l'option 2 uniquement)
+(texte pur option 2)
 ===OPT3===
-(texte pur de l'option 3 uniquement)"""
+(texte pur option 3)"""
 
     raw = await ask_gemini(prompt, image_bytes=media_bytes, mime_type=media_mime)
     info_line, opt1, opt2, opt3 = "", "", "", ""
@@ -715,17 +928,20 @@ RÉPONDS EXACTEMENT AU FORMAT SUIVANT (sans guillemets autour des options) :
             info_line = before_opt1.split("===INFO===", 1)[1].strip()
         opt1_part, rest2 = rest1.split("===OPT2===", 1)
         opt2_part, opt3_part = rest2.split("===OPT3===", 1)
-        opt1 = opt1_part.strip().strip("«»\"")
-        opt2 = opt2_part.strip().strip("«»\"")
-        opt3 = opt3_part.strip().strip("«»\"")
+        opt1 = clean_human_discord_reply(opt1_part, allow_emojis=False, strip_trailing_dot=True)
+        opt2 = clean_human_discord_reply(opt2_part, allow_emojis=False, strip_trailing_dot=True)
+        opt3 = clean_human_discord_reply(opt3_part, allow_emojis=False, strip_trailing_dot=True)
     else:
-        opt1 = raw[:300].strip()
-        opt2 = "carrément mdrr et toi ?"
-        opt3 = "grave trkl"
+        opt1 = clean_human_discord_reply(raw[:240], allow_emojis=False, strip_trailing_dot=True)
+        opt2 = "a deux doigts de te croire"
+        opt3 = "oe trkl"
 
     desc = ""
     if len(convo_lines) > 1:
-        desc += f"📖 *Fil lu automatiquement ({len(convo_lines)} messages)*"
+        desc += f"📖 *Fil lu ({len(convo_lines)} msgs)"
+        if user_samples_in_convo:
+            desc += f" • {len(user_samples_in_convo)} message(s) de toi imités"
+        desc += "*"
     if media_label:
         desc += f" • {media_label} analysé"
     if desc:
@@ -739,24 +955,24 @@ RÉPONDS EXACTEMENT AU FORMAT SUIVANT (sans guillemets autour des options) :
         desc += f"🎛️ *Mode actif : {custom_instruction[:90]}*\n"
 
     desc += (
-        f"\n**🎯 Option 1 ({style_label}) :**\n```\n{opt1}\n```\n"
-        f"**⚡ Option 2 (Drôle / Piquante) :**\n```\n{opt2}\n```\n"
-        f"**💬 Option 3 (Courte / Directe) :**\n```\n{opt3}\n```"
+        f"\n**1 · Naturel ({style_label}) :**\n```\n{opt1}\n```\n"
+        f"**2 · Ton humour / Vanne :**\n```\n{opt2}\n```\n"
+        f"**3 · Express :**\n```\n{opt3}\n```"
     )
 
     embed = discord.Embed(
-        title="💬 Studio Réponse Rapide (100% Furtif)",
+        title="💬 Répondre à ta place (Furtif • Zéro Emoji)",
         description=desc[:4000],
         color=discord.Color.teal()
     )
-    embed.set_footer(text="Clique sur « Copier » pour coller depuis TON vrai compte • Ou ajuste le style ci-dessous !")
+    embed.set_footer(text="Copier 1/2/3 = texte pur sans rien autour • Clique sur « Mon humour » pour lui apprendre tes vannes")
     return embed, opt1, opt2, opt3
 
 
 class GhostwriterIntentModal(discord.ui.Modal, title="✍️ Lui dire quoi répondre"):
     intent_input = discord.ui.TextInput(
         label="Que veux-tu lui dire en gros ?",
-        placeholder="Ex: dis non j'ai la flemme, propose 21h, rembarre-le gentiment...",
+        placeholder="Ex: dis non j'ai la flemme, propose 21h, vanne-le un peu...",
         style=discord.TextStyle.short,
         required=True,
         max_length=200
@@ -769,8 +985,10 @@ class GhostwriterIntentModal(discord.ui.Modal, title="✍️ Lui dire quoi répo
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
+        uid = str(interaction.user.id)
+        record_user_writing(uid, self.intent_input.value, is_chat=False)
         try:
-            instruction = f"Exprime cette idée précise : « {self.intent_input.value} »"
+            instruction = f"Exprime cette idée précise dans le style de l'utilisateur (sans emoji) : « {self.intent_input.value} »"
             embed, opt1, opt2, opt3 = await generate_ghostwriter_card(
                 interaction.user, interaction.channel, self.target_message, custom_instruction=instruction
             )
@@ -778,6 +996,55 @@ class GhostwriterIntentModal(discord.ui.Modal, title="✍️ Lui dire quoi répo
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
         except Exception as e:
             await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
+
+
+class CalibrateHumorModal(discord.ui.Modal, title="🎭 Apprendre ton humour à Batman"):
+    humor_desc = discord.ui.TextInput(
+        label="Décris ton humour & ton écriture (optionnel)",
+        placeholder="Ex: second degré sec, pince-sans-rire, taquin, tout en minuscules, jamais d'emojis, messages courts",
+        style=discord.TextStyle.short,
+        required=False,
+        max_length=300
+    )
+    humor_examples = discord.ui.TextInput(
+        label="Colle 2 à 6 vrais messages/vannes de toi",
+        placeholder="Ex:\nje rentabilise ma chaise\nt'es vachement convaincu frr\na deux doigts d'avoir raison\nbof flemme un peu la",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=1200
+    )
+
+    def __init__(self, target_message: discord.Message, author_id: int):
+        super().__init__()
+        self.target_message = target_message
+        self.author_id = author_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        uid = str(interaction.user.id)
+        notes = (self.humor_desc.value or "").strip()
+        raw_ex = (self.humor_examples.value or "").strip()
+        examples = [line.strip() for line in raw_ex.splitlines() if line.strip()]
+        if not notes and not examples:
+            return await interaction.followup.send("❌ Remplis au moins la description ou quelques exemples de tes messages.", ephemeral=True)
+        try:
+            dna = await analyze_and_save_humor_dna(
+                uid=uid,
+                explicit_notes=notes or None,
+                explicit_examples=examples or None
+            )
+            embed, opt1, opt2, opt3 = await generate_ghostwriter_card(
+                interaction.user,
+                interaction.channel,
+                self.target_message,
+                custom_instruction="Applique dès maintenant le nouvel humour et les expressions calibrées, zéro emoji."
+            )
+            if dna:
+                embed.add_field(name="🧠 Humour mémorisé par Batman", value=dna[:350], inline=False)
+            view = GhostwriterView(self.target_message, self.author_id, opt1, opt2, opt3)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"⚠️ Erreur : `{e}`", ephemeral=True)
 
 
 class GhostwriterView(discord.ui.View):
@@ -792,7 +1059,7 @@ class GhostwriterView(discord.ui.View):
     async def _copy_raw(self, interaction: discord.Interaction, text: str):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
-        # Envoie UNIQUEMENT le texte brut en éphémère : sur mobile appui long -> Copier le texte = 0 caractère parasite !
+        # Envoie UNIQUEMENT le texte brut en éphémère : 0 emoji, 0 caractère parasite
         await interaction.response.send_message(text, ephemeral=True)
 
     async def _rewrite_in_place(self, interaction: discord.Interaction, instruction: str):
@@ -808,7 +1075,7 @@ class GhostwriterView(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"⚠️ Erreur IA : `{e}`", ephemeral=True)
 
-    # Rangée 0 : Copie pure 1-clic (pour coller depuis TON vrai compte humain sans afficher Batman !)
+    # Rangée 0 : Copie pure 1-clic (texte brut pour coller depuis TON vrai compte)
     @discord.ui.button(label="Copier 1", style=discord.ButtonStyle.success, emoji="📋", row=0)
     async def btn_copy1(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._copy_raw(interaction, self.opt1)
@@ -821,39 +1088,53 @@ class GhostwriterView(discord.ui.View):
     async def btn_copy3(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._copy_raw(interaction, self.opt3)
 
-    # Rangée 1 : Studio d'ajustement en direct + envoi via bot optionnel
+    # Rangée 1 : Ajustement rapide 100% sans emojis ni ton IA
     @discord.ui.button(label="Guider", style=discord.ButtonStyle.primary, emoji="✍️", row=1)
     async def btn_guide(self, interaction: discord.Interaction, _: discord.ui.Button):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
         await interaction.response.send_modal(GhostwriterIntentModal(self.target_message, self.author_id))
 
-    @discord.ui.button(label="Mode SMS", style=discord.ButtonStyle.secondary, emoji="📱", row=1)
-    async def btn_sms(self, interaction: discord.Interaction, _: discord.ui.Button):
+    @discord.ui.button(label="+ Humour", style=discord.ButtonStyle.secondary, emoji="🎯", row=1)
+    async def btn_humor(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._rewrite_in_place(
             interaction,
-            "Style SMS Discord ultra-naturel : tout en minuscules, abréviations courantes crédibles (trkl, tkt, jsp, mdr si pertinent), zéro ponctuation robotique, court et spontané."
+            "Pousse encore plus l'humour personnel (vannes pince-sans-rire, second degré absurde ou taunt amical naturel) tout en restant 100% crédible et avec ZERO emoji."
         )
 
     @discord.ui.button(label="Piquant", style=discord.ButtonStyle.secondary, emoji="🔥", row=1)
     async def btn_spicy(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._rewrite_in_place(
             interaction,
-            "Style taquin, piquant, plein de répartie et de second degré pour avoir le dernier mot avec classe."
+            "Ton plus sec, taquin et incisif avec bonne répartie Discord, sans vulgarité lourde, sans phrases de robot et ZERO emoji."
+        )
+
+    @discord.ui.button(label="+ Court", style=discord.ButtonStyle.secondary, emoji="📏", row=1)
+    async def btn_short(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._rewrite_in_place(
+            interaction,
+            "Réponses ultra courtes (2 à 6 mots max), en minuscules, zéro ponctuation scolaire, ZERO emoji."
         )
 
     @discord.ui.button(label="Autres", style=discord.ButtonStyle.secondary, emoji="🔄", row=1)
     async def btn_regen(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._rewrite_in_place(
             interaction,
-            "Propose 3 nouvelles idées complètement différentes des précédentes."
+            "Propose 3 nouvelles réponses totalement différentes des précédentes, toujours 100% humaines et ZERO emoji."
         )
 
-    @discord.ui.button(label="Poster (Bot)", style=discord.ButtonStyle.secondary, emoji="🤖", row=1)
+    # Rangée 2 : Calibration humour + envoi via bot optionnel
+    @discord.ui.button(label="Mon humour", style=discord.ButtonStyle.secondary, emoji="🎭", row=2)
+    async def btn_calibrate(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        await interaction.response.send_modal(CalibrateHumorModal(self.target_message, self.author_id))
+
+    @discord.ui.button(label="Poster (Bot)", style=discord.ButtonStyle.secondary, emoji="🤖", row=2)
     async def btn_post_bot(self, interaction: discord.Interaction, _: discord.ui.Button):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
-        content = f"> 💬 *En réponse à {self.target_message.author.display_name} :*\n{self.opt1}"
+        content = f"> *En réponse à {self.target_message.author.display_name} :*\n{self.opt1}"
         # 1. Webhook si le bot est sur un serveur avec permission Webhook
         if interaction.guild and hasattr(interaction.channel, "webhooks"):
             try:
@@ -1954,6 +2235,8 @@ async def ia_command(
 )
 async def verifier_command(interaction: discord.Interaction, affirmation: str):
     await interaction.response.defer(ephemeral=True, thinking=True)
+    uid = str(interaction.user.id)
+    user_style = get_user_style_description(uid)
     prompt = f"""Vérifie rigoureusement cette affirmation à l'aide des informations récentes sur le web :
 « {affirmation} »
 
@@ -1961,7 +2244,7 @@ Réponds en français exactement selon cette structure :
 VERDICT : (écris ✅ VRAI, ❌ FAUX / MYTHO, ou ⚠️ NUANCÉ / INCOMPLET)
 PREUVE : (2 à 3 phrases claires avec les vrais chiffres, dates ou faits vérifiés)
 ===REPLIQUE===
-(une phrase naturelle et stylée prête à copier-coller dans une discussion Discord pour rétablir les faits sans passer pour un robot)"""
+(une phrase 100% naturelle et courte pour répondre sur Discord sans sonner comme une IA et SANS AUCUN EMOJI, en imitant ce style/humour si pertinent : {user_style[:400]})"""
 
     try:
         raw = await ask_gemini(prompt, use_search=True)
@@ -1969,7 +2252,7 @@ PREUVE : (2 à 3 phrases claires avec les vrais chiffres, dates ou faits vérifi
         if "===REPLIQUE===" in raw:
             parts = raw.split("===REPLIQUE===", 1)
             body = parts[0].strip()
-            replique = parts[1].strip().strip("«»\"")
+            replique = clean_human_discord_reply(parts[1], allow_emojis=False, strip_trailing_dot=True)
 
         desc = f"**Affirmation testée :** *« {affirmation[:180]} »*\n\n{body}"
         if replique:
@@ -1988,17 +2271,56 @@ PREUVE : (2 à 3 phrases claires avec les vrais chiffres, dates ou faits vérifi
 #  OUTILS DE CONVERSATION : REFORMULATION & RÉPARTIES (100% FURTIFS)
 # ══════════════════════════════════════════════════════════════
 REFORMULER_STYLES = [
-    app_commands.Choice(name="📱 Message Discord ultra-naturel (SMS / Décontracté)", value="Message Discord spontané, naturel, décontracté, sans ponctuation rigide ni ton IA"),
-    app_commands.Choice(name="🔤 Zéro faute (garde mon ton exact mais corrige)", value="Corrige uniquement l'orthographe et la grammaire tout en gardant exactement le même niveau de langage"),
-    app_commands.Choice(name="💼 Professionnel & Poli (Mail / Sérieux)", value="Professionnel, courtois, soutenu et irréprochable"),
-    app_commands.Choice(name="⚡ Clash percutant & sans pitié", value="Cinglant, tranchant, répartie affûtée sans insultes"),
-    app_commands.Choice(name="🤝 Diplomate & Calme", value="Diplomatique, bienveillant, posé et apaisant"),
-    app_commands.Choice(name="😂 Drôle & Second degré", value="Drôle, auto-dérision, second degré et plein d'esprit"),
-    app_commands.Choice(name="📏 Ultra-court & Direct", value="Ultra court, 3 à 8 mots max, droit au but"),
-    app_commands.Choice(name="🦇 Style Batman", value="Sombre, laconique, charismatique et percutant")
+    app_commands.Choice(name="📱 Message Discord naturel (sans emoji)", value="sms"),
+    app_commands.Choice(name="🔤 Zéro faute (garde exactement mon ton)", value="ortho"),
+    app_commands.Choice(name="😂 Avec mon humour (second degré / vanne)", value="humour"),
+    app_commands.Choice(name="⚡ Clash sec / Répartie (sans insultes)", value="clash"),
+    app_commands.Choice(name="💼 Professionnel & Poli", value="pro"),
+    app_commands.Choice(name="🤝 Diplomate & Posé", value="diplomate"),
+    app_commands.Choice(name="📏 Ultra-court (2-6 mots)", value="court"),
+    app_commands.Choice(name="🦇 Style Batman", value="batman")
 ]
 
-@bot.tree.command(name="reformuler", description="Réécrit ou corrige ton message en mode furtif avant de l'envoyer")
+REFORMULER_STYLE_PROMPTS = {
+    "sms": "Message Discord 100% humain et naturel : minuscules, pas de point final scolaire, zéro ponctuation rigide, pas de tournure d'IA, ZERO emoji.",
+    "ortho": "Corrige uniquement les grosses fautes d'orthographe/conjugaison tout en gardant exactement le même ton, les mêmes abréviations, sans rendre la phrase scolaire ni ajouter d'emoji.",
+    "humour": "Ajoute ou adapte la phrase avec l'humour personnel de l'utilisateur (second degré, pince-sans-rire, taquin naturel), crédible sur Discord, ZERO emoji, ZERO blague de robot.",
+    "clash": "Répartie sèche, tranchante et naturelle sur Discord sans insultes ni ponctuation robotique, ZERO emoji.",
+    "pro": "Professionnel, courtois, clair et irréprochable, sans emojis.",
+    "diplomate": "Diplomatique, posé, calme et naturel, sans emojis.",
+    "court": "Ultra court (2 à 6 mots max), droit au but, minuscules naturelles, ZERO emoji.",
+    "batman": "Sombre, laconique, calme et charismatique façon Batman, ZERO emoji."
+}
+
+
+class ThreeOptionsCopyView(discord.ui.View):
+    """Permet de copier l'une des 3 réparties pures en 1 clic sans aucun caractère parasite."""
+    def __init__(self, author_id: int, r1: str, r2: str, r3: str):
+        super().__init__(timeout=600)
+        self.author_id = author_id
+        self.r1 = r1
+        self.r2 = r2
+        self.r3 = r3
+
+    async def _copy(self, interaction: discord.Interaction, txt: str):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message("❌ Action non autorisée.", ephemeral=True)
+        await interaction.response.send_message(txt, ephemeral=True)
+
+    @discord.ui.button(label="Copier 1", style=discord.ButtonStyle.success, emoji="📋")
+    async def c1(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._copy(interaction, self.r1)
+
+    @discord.ui.button(label="Copier 2", style=discord.ButtonStyle.primary, emoji="📋")
+    async def c2(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._copy(interaction, self.r2)
+
+    @discord.ui.button(label="Copier 3", style=discord.ButtonStyle.secondary, emoji="📋")
+    async def c3(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._copy(interaction, self.r3)
+
+
+@bot.tree.command(name="reformuler", description="Réécrit ton message sans ton IA ni emojis en mode furtif")
 @everywhere
 @app_commands.describe(
     texte="Ton brouillon ou ce que tu veux dire",
@@ -2011,35 +2333,51 @@ async def reformuler(
     style: app_commands.Choice[str]
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
+    uid = str(interaction.user.id)
+    record_user_writing(uid, texte, is_chat=False)
+    user_style = get_user_style_description(uid)
+    style_desc = REFORMULER_STYLE_PROMPTS.get(style.value, style.value)
+    is_pro = style.value in ("pro", "diplomate")
+
     prompt = (
-        f"Reformule le texte suivant dans ce style : « {style.value} ».\n"
-        f"Conserve l'idée d'origine, sonne 100% humain.\n"
-        f"Ne donne QUE le texte final réécrit, sans guillemets ni commentaires :\n\n{texte}"
+        f"Réécris le message suivant selon cette consigne : {style_desc}\n"
+        f"Profil & humour de l'utilisateur à respecter si compatible :\n{user_style[:600]}\n\n"
+        "RÈGLES STRICTES : ZÉRO EMOJI (aucun emoji Unicode ni smiley), zéro guillemets, zéro commentaire autour, "
+        "et ne sonne surtout pas comme une IA.\n"
+        f"Message de base :\n{texte}"
     )
     try:
-        result = (await ask_gemini(prompt)).strip().strip("«»\"")
+        raw = await ask_gemini(prompt)
+        result = clean_human_discord_reply(raw, allow_emojis=False, strip_trailing_dot=(not is_pro))
         embed = discord.Embed(
             title=f"✍️ Message prêt ({style.name})",
             description=f"**Ton brouillon :**\n> *« {texte[:300]} »*\n\n**À copier :**\n```\n{result[:1800]}\n```",
             color=discord.Color.blue()
         )
-        embed.set_footer(text="100% Furtif • Clique sur « Copier le texte pur » pour mobile/PC !")
+        embed.set_footer(text="100% Furtif • Zéro emoji • Clique sur « Copier le texte pur »")
         await interaction.followup.send(embed=embed, view=RawCopyView(interaction.user.id, result), ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur : `{e}`", ephemeral=True)
 
 
-@bot.tree.command(name="repartie", description="Génère 3 réparties cinglantes en mode furtif (personne ne le voit !)")
+REPARTIE_PROMPTS = {
+    "taquin": "taquin, second degré léger et drôle entre potes",
+    "piquant": "pince-sans-rire, sec, malin et piquant",
+    "clash": "répartie sèche et dévastatrice sans insultes vulgaires ni ton scolaire",
+    "batman": "froid, calme, laconique et charismatique façon Batman"
+}
+
+@bot.tree.command(name="repartie", description="Génère 3 réparties naturelles qui collent à ton humour (furtif)")
 @everywhere
 @app_commands.describe(
     sujet="La pique reçue, le message ou la situation",
     intensite="Niveau d'intensité de la répartie"
 )
 @app_commands.choices(intensite=[
-    app_commands.Choice(name="😄 Taquin & Bon enfant", value="taquin et drôle entre potes"),
-    app_commands.Choice(name="🔥 Piquant & Mordant", value="piquant, malin et plein d'esprit"),
-    app_commands.Choice(name="⚡ Clash destructeur (sans insultes)", value="clash chirurgical et dévastateur mais sans vulgarité"),
-    app_commands.Choice(name="🦇 Punchline Batman", value="froid, calme et charismatique façon Batman")
+    app_commands.Choice(name="😄 Taquin & Bon enfant", value="taquin"),
+    app_commands.Choice(name="🔥 Piquant & Pince-sans-rire", value="piquant"),
+    app_commands.Choice(name="⚡ Clash sec (sans insultes)", value="clash"),
+    app_commands.Choice(name="🦇 Punchline Batman", value="batman")
 ])
 async def repartie(
     interaction: discord.Interaction,
@@ -2047,22 +2385,57 @@ async def repartie(
     intensite: app_commands.Choice[str] = None
 ):
     await interaction.response.defer(ephemeral=True, thinking=True)
-    lvl = intensite.value if intensite else "piquant, malin et plein d'esprit"
-    prompt = (
-        f"Génère 3 réparties naturelles sur Discord (pas de phrases de vieux livre, du vrai répondant crédible et spontané, sans insultes vulgaires) "
-        f"pour répondre à : « {sujet} ».\n"
-        f"Ton : {lvl}.\n"
-        f"Présente chaque répartie dans son propre bloc de code ``` pour pouvoir la copier en 1 clic."
-    )
+    uid = str(interaction.user.id)
+    user_style = get_user_style_description(uid)
+    lvl = REPARTIE_PROMPTS.get(intensite.value, "pince-sans-rire, malin et naturel") if intensite else "pince-sans-rire, malin et naturel"
+
+    prompt = f"""Génère 3 réparties 100% humaines sur Discord pour répondre à : « {sujet} »
+Ton demandé : {lvl}.
+
+Profil & humour de l'utilisateur à imiter :
+{user_style[:700]}
+
+INTERDICTIONS ABSOLUES :
+- ZÉRO EMOJI / SMILEY (aucun 😂, 🔥, 💀, :), ^^ etc.). Texte brut pur uniquement.
+- ZÉRO phrase d'IA ou de vieux livre ("Bien envoyé !", "Mon cher", "Haha t'es drôle !", guillemets, tirets cadratins —).
+- Écris court et naturel (minuscules ou ponctuation Discord réelle, sans point final scolaire).
+
+RÉPONDS EXACTEMENT AU FORMAT :
+===R1===
+(répartie 1 pure)
+===R2===
+(répartie 2 pure)
+===R3===
+(répartie 3 pure)"""
+
     try:
-        res = await ask_gemini(prompt)
+        raw = await ask_gemini(prompt)
+        if "===R1===" in raw and "===R2===" in raw and "===R3===" in raw:
+            p1 = raw.split("===R1===", 1)[1]
+            r1_raw, rest = p1.split("===R2===", 1)
+            r2_raw, r3_raw = rest.split("===R3===", 1)
+            r1 = clean_human_discord_reply(r1_raw, allow_emojis=False, strip_trailing_dot=True)
+            r2 = clean_human_discord_reply(r2_raw, allow_emojis=False, strip_trailing_dot=True)
+            r3 = clean_human_discord_reply(r3_raw, allow_emojis=False, strip_trailing_dot=True)
+            desc = (
+                f"**Face à :** *« {sujet[:150]} »*\n\n"
+                f"**1 · Naturelle :**\n```\n{r1}\n```\n"
+                f"**2 · Sèche / Humour :**\n```\n{r2}\n```\n"
+                f"**3 · Courte :**\n```\n{r3}\n```"
+            )
+            view = ThreeOptionsCopyView(interaction.user.id, r1, r2, r3)
+        else:
+            cleaned = strip_emojis(raw)
+            desc = f"**Face à :** *« {sujet[:150]} »*\n\n{cleaned[:3500]}"
+            view = RawCopyView(interaction.user.id, cleaned)
+
         embed = discord.Embed(
-            title="⚡ 3 Réparties Furtives",
-            description=f"**Face à :** *« {sujet[:150]} »*\n\n{res[:3500]}",
+            title="⚡ 3 Réparties Furtives (Zéro Emoji)",
+            description=desc[:3900],
             color=discord.Color.dark_red()
         )
-        embed.set_footer(text="100% Furtif (visible uniquement par toi) • Copie ta préférée !")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        embed.set_footer(text="100% Furtif • Ton humour imité • Clique sur Copier 1/2/3 !")
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"⚠️ Erreur : `{e}`", ephemeral=True)
 
@@ -2108,14 +2481,24 @@ async def afk_off(interaction: discord.Interaction):
 #  /image & /imagine  —  Génération d'images par IA
 # ══════════════════════════════════════════════════════════════
 IMAGE_STYLES = [
-    app_commands.Choice(name="🎨 Standard / Naturel", value="Naturel"),
-    app_commands.Choice(name="📸 Photoréaliste", value="photorealistic, 8k photography, highly detailed, sharp focus"),
-    app_commands.Choice(name="🦇 Batman / Gotham Dark", value="dark gothic style, Batman comics noir, moody dramatic shadows, cinematic rain"),
-    app_commands.Choice(name="🏮 Anime / Manga", value="anime aesthetic, Makoto Shinkai style, vibrant colors, detailed line art"),
-    app_commands.Choice(name="⚡ Cyberpunk", value="cyberpunk city, neon lights, futuristic, rainy night, synthwave"),
-    app_commands.Choice(name="🖌️ Peinture à l'huile", value="oil painting on canvas, expressive brush strokes, classical art"),
-    app_commands.Choice(name="🕹️ Pixel Art", value="pixel art 32-bit, retro gaming aesthetic")
+    app_commands.Choice(name="🎨 Standard / Naturel", value="naturel"),
+    app_commands.Choice(name="📸 Photoréaliste", value="photo"),
+    app_commands.Choice(name="🦇 Batman / Gotham Dark", value="batman"),
+    app_commands.Choice(name="🏮 Anime / Manga", value="anime"),
+    app_commands.Choice(name="⚡ Cyberpunk", value="cyberpunk"),
+    app_commands.Choice(name="🖌️ Peinture à l'huile", value="huile"),
+    app_commands.Choice(name="🕹️ Pixel Art", value="pixel")
 ]
+
+IMAGE_STYLE_PROMPTS = {
+    "naturel": "Naturel",
+    "photo": "photorealistic, 8k photography, highly detailed, sharp focus",
+    "batman": "dark gothic style, Batman comics noir, moody dramatic shadows, cinematic rain",
+    "anime": "anime aesthetic, Makoto Shinkai style, vibrant colors, detailed line art",
+    "cyberpunk": "cyberpunk city, neon lights, futuristic, rainy night, synthwave",
+    "huile": "oil painting on canvas, expressive brush strokes, classical art",
+    "pixel": "pixel art 32-bit, retro gaming aesthetic"
+}
 
 IMAGE_RATIOS = [
     app_commands.Choice(name="⬛ Carré 1:1 (Avatar / Insta)", value="1:1"),
@@ -2176,7 +2559,7 @@ async def image_command(
 ):
     await interaction.response.defer(thinking=True)
     try:
-        chosen_style = style.value if style else "Naturel"
+        chosen_style = IMAGE_STYLE_PROMPTS.get(style.value, "Naturel") if style else "Naturel"
         style_label = style.name if style else "Standard"
         chosen_ratio = format.value if format else "1:1"
         img_bytes, engine = await generate_ai_image(description, chosen_style, chosen_ratio)

@@ -5,7 +5,7 @@ Un bot Discord couteau suisse moderne hébergé 24h/24 gratuitement sur Render.
 ## 🌟 Fonctionnalités Exceptionnelles
 
 ### 🖱️ Menus Clic-Droit 100% Furtifs (Apps Discord Personnelles)
-* **💬 Répondre à ma place (Studio Ghostwriter V2)** : Lit automatiquement le fil de la discussion (texte, **message vocal** ou **image**), imite ton vrai style (même en langue étrangère !) et t'offre des boutons interactifs : `📋 Copier 1/2/3` (pour coller depuis ton vrai compte sans jamais afficher le bot), `✍️ Guider` (pop-up), `📱 Mode SMS`, `🔥 Piquant` et `🔄 Autres`.
+* **💬 Répondre à ma place (Studio Ghostwriter V3 Anti-IA)** : Lit automatiquement le fil de la discussion (texte, **message vocal** ou **image**), rédige **zéro emoji** et **zéro ton IA** en imitant **ton humour et ton style** avec boutons interactifs : `📋 Copier 1/2/3`, `🎯 + Humour`, `🎭 Mon humour`, `✍️ Guider`, `🔥 Piquant`, `📏 + Court` et `🔄 Autres`.
 * **🧠 Résumer avec Batman** : **Écoute les messages vocaux en cachette** (transcription + résumé sans lancer l'audio !), résume les PDF/fichiers, les longs pavés ou rattrape les 25 derniers messages d'une discussion manquée.
 * **🎭 Analyser ton & sous-entendus** : Décode l'ironie, les excuses/mythos, l'intérêt caché (même à l'intonation d'un vocal !) + bouton direct pour préparer 3 réponses adaptées.
 * **🔍 Analyser l'image (IA)** : Mode furtif qui résout un devoir/exercice pris en photo, lit le texte (OCR) ou explique un mème sans que personne dans le chat ne le voie.
